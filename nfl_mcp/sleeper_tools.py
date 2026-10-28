@@ -123,6 +123,11 @@ async def get_league(league_id: str) -> dict:
         - error: Error message (if any)
         - error_type: Type of error (if any)
     """
+    from .yahoo import is_yahoo_league
+    if is_yahoo_league(league_id):
+        from .yahoo.runtime import get_provider
+        return create_success_response({"league": await (await get_provider(league_id)).get_league()})
+
     headers = get_http_headers("sleeper_league")
 
     # Sleeper API endpoint for specific league
@@ -496,7 +501,12 @@ async def _fetch_rosters(league_id: str) -> dict:
         attempts += 1
         try:
             async with create_http_client() as client:
-                response, data_age = await sleeper_get_fresh(client, url, headers)
+                from .yahoo import is_yahoo_league
+                if is_yahoo_league(league_id):
+                    from .yahoo.runtime import rosters_response
+                    response, data_age = await rosters_response(league_id)
+                else:
+                    response, data_age = await sleeper_get_fresh(client, url, headers)
                 if response.status_code in (401,403,404):
                     # Direct terminal errors (no retry beyond first)
                     if response.status_code == 404:
@@ -723,6 +733,15 @@ async def get_league_users(league_id: str) -> dict:
         - error: Error message (if any)
         - error_type: Type of error (if any)
     """
+    from .yahoo import is_yahoo_league
+    if is_yahoo_league(league_id):
+        from .yahoo.runtime import get_provider
+        prov = await get_provider(league_id)
+        teams = await prov.get_waiver_order()
+        users = [{"user_id": t["mid"], "display_name": t["name"], "username": t["name"],
+                  "metadata": {"team_name": t["name"]}} for t in teams]
+        return create_success_response({"users": users, "count": len(users)})
+
     headers = get_http_headers("sleeper_users")
 
     # Sleeper API endpoint for league users
@@ -813,7 +832,12 @@ async def _get_matchups_uncached(league_id: str, week: int) -> dict:
         attempts += 1
         try:
             async with create_http_client() as client:
-                response, data_age = await sleeper_get_fresh(client, url, headers)
+                from .yahoo import is_yahoo_league
+                if is_yahoo_league(league_id):
+                    from .yahoo.runtime import matchups_response
+                    response, data_age = await matchups_response(league_id, week)
+                else:
+                    response, data_age = await sleeper_get_fresh(client, url, headers)
                 if response.status_code in (401,403,404):
                     if response.status_code == 404:
                         return create_error_response(

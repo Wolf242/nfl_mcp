@@ -1,0 +1,13 @@
+# nfl_mcp with the Yahoo browser reader (Playwright + Chromium preinstalled).
+# Sign in to Yahoo ONCE on a machine with a display (python -m nfl_mcp.yahoo.login), then mount the
+# resulting profile folder read/write into the container so the headless reader reuses the session:
+#   docker build -f Dockerfile.yahoo -t nfl_mcp_yahoo .
+#   docker run -p 9000:9000 -v $HOME/.nfl_mcp:/root/.nfl_mcp nfl_mcp_yahoo
+FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
+WORKDIR /app
+COPY requirements.txt pyproject.toml ./
+COPY nfl_mcp ./nfl_mcp
+RUN pip install --no-cache-dir -r requirements.txt && pip install --no-cache-dir -e ".[yahoo]"
+ENV YAHOO_PROFILE_DIR=/root/.nfl_mcp/yahoo-profile
+EXPOSE 9000
+CMD ["python", "-m", "nfl_mcp.server"]

@@ -1,0 +1,63 @@
+# Yahoo league support (read-only) and Bluesky news leads
+
+Pass a Yahoo league as `yahoo:<number>` (for BFS: `yahoo:1234567`) to any league tool. Rosters, matchups, league settings and
+users are read from Yahoo and returned in Sleeper's shape, so the lineup, waiver, opponent, bye and injury tools run on it
+unchanged. Seven extra tools are Yahoo/news specific (`get_yahoo_waiver_order`, `plan_yahoo_waiver_sequence`,
+`get_yahoo_free_agents`, `get_yahoo_transactions`, `check_yahoo_scoring`, `get_insider_posts`, `verify_news_handles`).
+
+## Safety contract
+
+* **Read-only.** There is no add, drop, claim, trade or lineup-edit code in this package. `nfl_mcp/yahoo/guard.py`
+  allow-lists the pages that may be loaded (roster, matchup, players, standings, transactions, settings) and rejects any
+  URL with a write verb or a `crumb` token. Yahoo's add/drop links are plain GETs, so the allow-list - not "GET only" - is what
+  protects the roster. `tests/test_yahoo_core.py` pins this.
+* **No credentials in code.** Browser route: you sign in yourself; only the browser profile (cookies) is kept. API route: client
+  id/secret come from your environment; the token file is mode 600.
+* **News is leads.** Bluesky posts are tagged `single_source` / `lead`. Confirm player, body part, status and date in a second
+  independent source before acting.
+* Yahoo's terms restrict automated access. The reader is rate-limited (1.5 s between pages, 60 s cache) and only reads your own
+  league; whether that is acceptable is your call.
+
+## Three ways to give it Yahoo data
+
+| Route | Setup | Status |
+|---|---|---|
+| **Logged-in browser** (default) | `pip install -e ".[yahoo]" && playwright install chromium`, then `python -m nfl_mcp.yahoo.login` and sign in yourself in the window | parsers written against the live DOM; tested on synthetic pages - run the self-check below |
+| **Saved pages** | set `YAHOO_SNAPSHOT_DIR=/path` with pages saved by `selfcheck --save` (or by hand) | simplest; nothing logs in |
+| **Official API** | register an app at developer.yahoo.com (Fantasy Sports, **read** permission), set `YAHOO_CLIENT_ID`, `YAHOO_CLIENT_SECRET`, `YAHOO_ACCESS=api` | **experimental, unverified** against live Yahoo; implements standings + rosters only; earlier tests of a new app returned `additional_authorization_required` |
+
+Docker: `Dockerfile.yahoo` bundles Chromium. Do the one-time sign-in on a machine with a display, then mount the profile:
+`docker run -p 9000:9000 -v $HOME/.nfl_mcp:/root/.nfl_mcp nfl_mcp_yahoo`. A profile created on another OS may need a fresh
+sign-in inside the container's Chromium version.
+
+## First run: verify against the live site
+
+```
+python -m nfl_mcp.yahoo.selfcheck 1234567 9 --save ./yahoo-pages
+```
+
+It prints the scoring source, the waiver order, how many of your players mapped to Sleeper ids, every **UNMAPPED** player, and
+the first running backs on the wire with their `FA` / `W (date)` tag. Anything unmapped or empty means a selector needs a fix:
+send the saved pages (`--save`) and they become real test fixtures.
+
+## Environment
+
+`YAHOO_PROFILE_DIR`, `YAHOO_SNAPSHOT_DIR`, `YAHOO_ACCESS` (`api` for the experimental route), `YAHOO_CLIENT_ID`,
+`YAHOO_CLIENT_SECRET`, `YAHOO_TOKEN_FILE`, `NFL_MCP_BLUESKY_HANDLES` (comma separated).
+
+## BFS rules encoded here
+
+* Scoring (`nfl_mcp/yahoo/scoring.py`): read from Yahoo's settings page on 2026-10-27 and re-read live on every `get_league`;
+  a commissioner change shows up in `metadata.scoring_diff_from_bfs`. nfl_mcp pays the yardage bonus as a non-stacking pair, so
+  BFS's "+2 at 100/300, +5 in total at 200/400" is stored as 2 and 5.
+* Waivers (`nfl_mcp/yahoo/waiver_model.py`): one rolling list; every successful claim (contested or not) sends the winner to the
+  bottom; failed claims are free; free-agent adds/drops do not move anyone; the priority on Yahoo's Waiver Offers page is the
+  position when that claim was processed. Validated against the league log (21 contested claims, final order reproduced exactly).
+
+## Known gaps
+
+* Projections: the lineup tools use nfl_mcp's own projections, not Yahoo's. Yahoo's per-player projection is carried on each
+  roster slot (`yahoo_slots[].projected`) but is not yet fed into the optimizer.
+* Bluesky handles in `DEFAULT_HANDLES` came from one 2025 article and were never resolved live. Run `verify_news_handles`.
+  X/Twitter has no free read API, so it is not included.
+* The API route does not implement matchups, free agents or transactions.

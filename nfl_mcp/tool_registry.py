@@ -126,6 +126,15 @@ from .tools.waiver import (
     plan_roster_moves,
     recommend_faab_bid,
 )
+from .tools.yahoo import (
+    check_yahoo_scoring,
+    get_insider_posts,
+    get_yahoo_free_agents,
+    get_yahoo_transactions,
+    get_yahoo_waiver_order,
+    plan_yahoo_waiver_sequence,
+    verify_news_handles,
+)
 
 if FEATURE_LEAGUE_LEADERS:
     from .tools.nfl_info import get_league_leaders
@@ -165,6 +174,8 @@ IN_SEASON_TOOLS = frozenset({
     "analyze_opponent", "analyze_roster_matchups", "get_stack_opportunities",
     "get_vegas_lines", "find_trade_targets", "get_trade_market", "get_opportunity_projections",
     "get_usage_trends",
+    "get_yahoo_waiver_order", "plan_yahoo_waiver_sequence", "get_yahoo_free_agents",
+    "get_yahoo_transactions", "check_yahoo_scoring",
 })
 
 _PROFILE_HIDDEN = {
@@ -314,6 +325,15 @@ def _registered_tools() -> list[Callable]:
         get_injury_report,
         get_injury_trends,
         get_gameday_inactives,
+
+        # Yahoo league (read-only) + social news leads
+        get_yahoo_waiver_order,
+        plan_yahoo_waiver_sequence,
+        get_yahoo_free_agents,
+        get_yahoo_transactions,
+        check_yahoo_scoring,
+        verify_news_handles,
+        get_insider_posts,
 
         # Coaching Intelligence Tools
         get_coaching_staff,

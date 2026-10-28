@@ -6,7 +6,7 @@
 [![Data-source watchdog](https://github.com/gtonic/nfl_mcp/actions/workflows/contracts.yml/badge.svg)](https://github.com/gtonic/nfl_mcp/actions/workflows/contracts.yml)
 [![Docker image](https://img.shields.io/badge/image-ghcr.io%2Fgtonic%2Fnfl__mcp-2496ED?logo=docker&logoColor=white)](https://github.com/gtonic/nfl_mcp/pkgs/container/nfl_mcp)
 [![Python 3.11 | 3.12 | 3.13](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776AB?logo=python&logoColor=white)](https://github.com/gtonic/nfl_mcp)
-[![63 in-season MCP tools](https://img.shields.io/badge/MCP%20tools-63%20in--season%20%7C%2080%20total-8A2BE2)](#-whats-inside)
+[![70 in-season MCP tools](https://img.shields.io/badge/MCP%20tools-70%20in--season%20%7C%2087%20total-8A2BE2)](#-whats-inside)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 NFL MCP turns real NFL & fantasy data into a decisive edge — a suite of tools that plug
@@ -110,7 +110,7 @@ Co-managers work too: pass your own Sleeper `user_id` and the roster is found vi
 
 ## 🧰 What's inside
 
-63 MCP tools in the default in-season profile (80 in total), grouped by what they do.
+70 MCP tools in the default in-season profile (87 in total), grouped by what they do.
 Every tool ships its own parameter schema over MCP, so your assistant can introspect
 them directly; **[AGENT.md](AGENT.md)** documents all of them plus integration guidance.
 
@@ -118,9 +118,9 @@ them directly; **[AGENT.md](AGENT.md)** documents all of them plus integration g
 
 | Profile | Tools | Hides |
 |---|---|---|
-| `season` (default) | 63 | draft (8), coaching (4), cache-refresh admin (3), `get_league_leaders`, `get_cbs_expert_picks` |
-| `offseason` | 46 | in-season-only tools (lineups, waivers, Vegas, weather, byes, playoff odds, …), admin, `get_cbs_expert_picks` |
-| `full` | 80 | nothing |
+| `season` (default) | 70 | draft (8), coaching (4), cache-refresh admin (3), `get_league_leaders`, `get_cbs_expert_picks` |
+| `offseason` | 48 | in-season-only tools (lineups, waivers, Vegas, weather, byes, playoff odds, …), admin, `get_cbs_expert_picks` |
+| `full` | 87 | nothing |
 
 The active profile and its tool count are logged at startup and reported by `GET /health` (`tools`).
 
@@ -138,6 +138,12 @@ The active profile and its tool count are logged at startup and reported by `GET
 
 **🏈 Your Sleeper league**
 `get_league` · `get_rosters` · `get_league_users` · `get_matchups` · `get_playoff_bracket` · `get_transactions` (the current week includes the previous leg, where Sleeper files the Wednesday waiver run) · `get_trending_players` · `get_fantasy_context` (aggregate) · `get_nfl_state` · `get_user` · `get_user_leagues`
+
+**🟣 Your Yahoo league** (read-only; use the league id `yahoo:<number>`)
+Every Sleeper league tool above (`get_league`, `get_rosters`, `get_matchups`, the lineup, waiver, opponent and bye tools) also accepts a Yahoo league id. Yahoo-only extras: `get_yahoo_waiver_order` (the current rolling order) · `plan_yahoo_waiver_sequence` (how to rank claims on a rolling list) · `get_yahoo_free_agents` (instant `FA` vs `W (date)` claim-only tags) · `get_yahoo_transactions` (the log, or contested claims with every team's priority) · `check_yahoo_scoring` (live scoring vs the verified BFS constants). Yahoo access is a browser profile you sign into yourself, or saved pages; there is no add, drop, claim, trade or lineup code. See [`docs/YAHOO.md`](docs/YAHOO.md).
+
+**📣 Breaking-news leads** (Bluesky)
+`get_insider_posts` (original posts from reporters you configure, tagged single-source leads) · `verify_news_handles` (confirm each handle is the reporter you expect before trusting it)
 
 **🩺 Injuries & availability**
 `get_injury_report` (who is hurt: teams / players, `min_confidence`, `severity`, `since`, practice reports; healthy rows only with `include_healthy`; ESPN source) · `get_injury_trends` (**what changed** since you last looked) · `get_gameday_inactives` · `get_player_news` (**what is the latest on X** — one merged timeline per player from ESPN's fantasy feed, NBC Sports / Rotoworld and CBS, with the role / availability flags the projections read, each with source and link; `league_id` alone lists your league's rostered players with news)

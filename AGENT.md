@@ -36,15 +36,15 @@ The NFL MCP Server follows a simplified, maintainable architecture:
 
 ## Tool Categories
 
-The server has **80 MCP tools** (including `get_league_leaders`, behind the
+The server has **87 MCP tools** (including `get_league_leaders`, behind the
 `league_leaders` feature flag, enabled by default). Which of them are registered
 depends on the tool profile, `NFL_MCP_TOOL_PROFILE`:
 
 | Profile | Tools | Registered |
 |---|---|---|
-| `season` (default) | 63 | everything except draft (8), coaching (4), admin cache refreshes (`fetch_athletes`, `fetch_all_players`, `fetch_teams`), `get_league_leaders`, `get_cbs_expert_picks` |
-| `offseason` | 46 | draft and coaching; not the in-season-only tools (briefing, retro, projection accuracy, league changes, bye plan, lineups/start-sit, waivers/FAAB/IR, Vegas, weather, streaming, matchups, opponent, playoff odds/bracket, trade finder/market, usage/opportunity), admin or `get_cbs_expert_picks` |
-| `full` | 80 | everything |
+| `season` (default) | 70 | everything except draft (8), coaching (4), admin cache refreshes (`fetch_athletes`, `fetch_all_players`, `fetch_teams`), `get_league_leaders`, `get_cbs_expert_picks` |
+| `offseason` | 48 | draft and coaching; not the in-season-only tools (briefing, retro, projection accuracy, league changes, bye plan, lineups/start-sit, waivers/FAAB/IR, Vegas, weather, streaming, matchups, opponent, playoff odds/bracket, trade finder/market, usage/opportunity), admin or `get_cbs_expert_picks` |
+| `full` | 87 | everything |
 
 The profile and count are logged at startup and returned by `GET /health`
 under `tools`. Every tool also ships its own parameter schema over MCP, so an
@@ -57,7 +57,7 @@ now parameters of the one kept (see the CHANGELOG for the old → new mapping).
 <!-- BEGIN GENERATED: tool-index (scripts/gen_agent_docs.py) -->
 <!-- Do not edit by hand: run `python scripts/gen_agent_docs.py`. -->
 
-All 80 tools, grouped by the `nfl_mcp/tools/` module that defines them (season: 63, offseason: 46, full: 80).
+All 87 tools, grouped by the `nfl_mcp/tools/` module that defines them (season: 70, offseason: 48, full: 87).
 
 | Tool | Profiles | Module | Summary |
 |---|---|---|---|
@@ -141,6 +141,13 @@ All 80 tools, grouped by the `nfl_mcp/tools/` module that defines them (season: 
 | `get_waiver_targets` | season, full | `waiver` | START HERE for "who should I pick up" - the waiver question, for YOUR league. |
 | `plan_roster_moves` | season, full | `waiver` | CHECK A ROSTER PLAN BEFORE ENTERING IT - and verify it afterwards. |
 | `recommend_faab_bid` | season, full | `waiver` | Recommend a FAAB waiver bid for a player (% of budget + absolute). |
+| `check_yahoo_scoring` | season, full | `yahoo` | Compare the league's live scoring settings with the verified BFS constants and report any change. |
+| `get_insider_posts` | season, offseason, full | `yahoo` | Latest original posts from NFL reporters on Bluesky. Leads only: single-source, unverified until a second source agrees. |
+| `get_yahoo_free_agents` | season, full | `yahoo` | Available players with the W/FA tag: ``W`` + date = waiver claim until then, ``FA`` = instant add. |
+| `get_yahoo_transactions` | season, full | `yahoo` | Yahoo transaction log. ``kind``: ``all`` or ``waiver`` (contested claims with every team's priority). |
+| `get_yahoo_waiver_order` | season, full | `yahoo` | Current waiver order for a Yahoo league (1 = first claim) and how the rolling list works. |
+| `plan_yahoo_waiver_sequence` | season, full | `yahoo` | Rank claims for the rolling list. ``wishlist`` items: ``{player, value, drop}``. |
+| `verify_news_handles` | season, offseason, full | `yahoo` | Resolve Bluesky handles to profiles (name, bio, followers) so you can confirm they are the reporters you expect. |
 <!-- END GENERATED: tool-index -->
 
 ### 1. NFL Information Tools (8 tools)
@@ -559,6 +566,18 @@ sentence; it is the decision.
   - Returns: games, summary, team_environments?, roster? {analysis, best_environments, worst_environments, on_bye}
 - **`get_stack_opportunities`**: Identify high-total games for stacking opportunities.
   - Parameters: `min_total` (optional, default 48.0)
+
+### 13b. Yahoo League & Social News Leads (7 tools)
+
+Pass a Yahoo league as `yahoo:<number>` (for example `yahoo:1234567`) to any Sleeper league tool; rosters, matchups, league settings and users are read from Yahoo and returned in Sleeper's shape. The Yahoo provider is **read-only**: it cannot add, drop, claim, trade or edit a lineup.
+
+- `get_yahoo_waiver_order` (`league_id`) - current rolling waiver order. A won claim (contested or not) sends the winner to the bottom; a failed claim costs nothing; free-agent adds and drops do not move anyone.
+- `plan_yahoo_waiver_sequence` (`league_id, my_mid, wishlist, contested`) - advisory ranking of claims.
+- `get_yahoo_free_agents` (`league_id, position`) - `FA` is an instant add; `W (date)` is a claim until that date.
+- `get_yahoo_transactions` (`league_id, kind`) - `all`, or `waiver` for contested claims with each team's priority.
+- `check_yahoo_scoring` (`league_id`) - live scoring settings vs the verified BFS constants.
+- `get_insider_posts` (`handles, hours, limit, watch_names`) - Bluesky posts from configured reporters. **Leads only**: single-source and unverified; confirm player, body part, status and date in a second independent source before acting.
+- `verify_news_handles` (`handles`) - resolves handles to profiles so you can confirm who they are.
 
 ### 14. Injury Intelligence & Player News (4 tools)
 
