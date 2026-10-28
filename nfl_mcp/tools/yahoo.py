@@ -186,10 +186,14 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
       the starters' team total (a team gap under 12 points is noise)
     - problems: starters on bye, empty slots, starters tagged O/D, IR-slot players whose tag is not
       IR-eligible, a full bench
-    - wire: FA / W (date) tags at each position with a bye hole or a problem, plus the top
-      get_waiver_targets
+    - wire: FA / W (date) tags at each position with a bye hole or a problem, each candidate
+      projected and ranked with its upgrade over what it replaces, when claims clear, plus the top
+      get_waiver_targets (each with Yahoo's own tag)
+    - drop_candidates: the bench, least useful this week first
     - opponent: projected points, injured starters, starters on bye
-    - byes: the next four weeks, flagging any where you would have fewer than two active RBs
+    - byes: the next four weeks, flagging any with fewer than two active RBs or two or more starters out
+    - verification: each injury tag and bye week checked against nfl_mcp's injury data and the NFL
+      schedule: agree, conflict, yahoo_only or unverified
     - news: reporter posts naming your players, each a single-source lead
     - warnings: anything single-source or unverified
     Yahoo's projections are shown for comparison only and never feed nfl_mcp's own.
@@ -200,16 +204,22 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
     mid, err = _mid(roster_id)
     if err:
         return err
-    from .. import waiver_target_tools
+    from .. import projections, ros, waiver_target_tools
+    from ..database import get_shared_db
     from ..week_context import resolve_season_week
     from ..yahoo.checkin import build_checkin
     from ..yahoo.compare import compare_projections
-    _, week, _ = await resolve_season_week(None, week)
+    season, week, _ = await resolve_season_week(None, week)
     if not week:
         return {"success": False, "error": "Could not determine the NFL week; pass week."}
+
+    async def schedules(weeks: list[int]) -> dict:
+        return await ros.schedules_for(get_shared_db(), int(season), weeks)
+
     return await build_checkin(
         await get_provider(league_id), league_id, mid, int(week), compare=compare_projections,
-        targets=waiver_target_tools.get_waiver_targets, posts=news_social.get_insider_posts)
+        project=projections.project_players, targets=waiver_target_tools.get_waiver_targets,
+        posts=news_social.get_insider_posts, schedules=schedules if season else None)
 
 
 @timing_decorator("verify_news_handles", tool_type="yahoo")

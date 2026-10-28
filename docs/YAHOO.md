@@ -10,10 +10,19 @@ unchanged. Nine extra tools are Yahoo/news specific (`get_yahoo_waiver_order`, `
 `fantasy_checkin(week=None, league_id=None, roster_id=None)` is one read-only call that returns the league (scoring source and any
 difference from the BFS constants, waiver order and your position), every roster slot with bye week, injury tag and Yahoo vs
 nfl_mcp projection, a `problems` list (starters on bye, empty slots, starters tagged O/D, IR-slot players whose tag is not IR-eligible,
-a full bench), the wire for each problem position (`FA` vs `W (date)`) plus the top `get_waiver_targets`, the opponent (projected
-points, injured starters, byes), the next four weeks of byes (flagging weeks with fewer than two active RBs), reporter posts that name
-your players, and `warnings` for anything single-source or unverified. A team-level projection gap under 12 points is reported as
-noise. Nothing is added, dropped, claimed, traded or changed on Yahoo.
+a full bench), the wire for each problem or bye-hole position (`FA` vs `W (date)`), with every candidate projected in nfl_mcp's own
+model and ranked by its upgrade over what it would replace (zero when a starter is on bye or out), when the claims clear, and the
+top `get_waiver_targets` carrying Yahoo's own tag; `drop_candidates` (the bench, least useful this week first; a ranking by this
+week's projection only); the opponent (projected points, injured starters, byes); the next four weeks of byes (flagging weeks with
+fewer than two active RBs or two or more starters on bye); reporter posts that name your players; and `warnings`. A team-level
+projection gap under 12 points is reported as noise. Players on bye have no projection from anyone and show as on bye.
+Nothing is added, dropped, claimed, traded or changed on Yahoo.
+
+**Verification.** Yahoo's injury tags and bye weeks are cross-checked where nfl_mcp has data: injury tags against nfl_mcp's own
+injury reports (with the week's practice line and the game-day decision), bye weeks against the cached NFL schedule for the next
+four weeks (fetched and cached if missing). Each item is `agree`, `conflict`, `yahoo_only` / `unverified` (no second source) or
+`other_only` (nfl_mcp has an injury report Yahoo does not show). A `yahoo_only` tag is Yahoo's word alone. How much gets verified
+depends on what your server has cached: a cold server verifies byes (the schedule is fetched) but may have no injury reports.
 
 No league or team id lives in the repo. Set them in your environment:
 

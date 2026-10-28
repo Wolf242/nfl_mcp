@@ -5,14 +5,38 @@ pins that. Shared by ``get_yahoo_projection_comparison`` and ``fantasy_checkin``
 """
 from __future__ import annotations
 
+import re
+
 NOT_PROJECTED_SLOTS = ("IR",)
+_NO_SLEEPER = "no Sleeper projection for "
+_MORE = re.compile(r"\s*\(\+\d+ more\)\s*$")
+
+
+def _without_bye_players(warnings: list[str], bye_names: set[str]) -> list[str]:
+    """Drop bye players from "no Sleeper projection for ..." warnings: nobody projects a bye week."""
+    out = []
+    for w in warnings:
+        if not w.startswith(_NO_SLEEPER):
+            out.append(w)
+            continue
+        head, sep, tail = w.partition(" — ")
+        names = [n for n in _MORE.sub("", head[len(_NO_SLEEPER):]).split(", ") if n]
+        keep = [n for n in names if n not in bye_names]
+        if keep:
+            out.append(_NO_SLEEPER + ", ".join(keep) + sep + tail)
+    return out
 
 
 async def compare_projections(league_id: str, rows: list[dict], week: int | None = None) -> dict:
     """``rows`` are :meth:`YahooProvider.get_projection_inputs` rows.
 
     ``our_projection`` is the Sleeper-first blend every other lineup tool uses; ``gap`` is ours
-    minus Yahoo's. A player on bye (by nfl_mcp's schedule or Yahoo's bye week) has neither number.
+    minus Yahoo's. A player on bye (by nfl_mcp's schedule or Yahoo's bye week) has no projection
+    from anyone: every projection field is None and ``on_bye`` is True.
+
+    Each row also carries nfl_mcp's own view of the player's injury (``nfl_injury_status`` and where
+    it came from), the week's practice line and the game-day decision, which ``fantasy_checkin``
+    uses to cross-check Yahoo's tag.
     """
     from ..projections import project_players
 
@@ -22,7 +46,7 @@ async def compare_projections(league_id: str, rows: list[dict], week: int | None
          for r in live], league_id=league_id, week=week)
     ours = {p.get("player"): p for p in res.get("projections") or []}
     wk = res.get("week")
-    out, warnings = [], list(res.get("warnings") or [])
+    out = []
     for r in rows:
         p = ours.get(r["name"]) if r in live else None
         # Yahoo's own bye week settles it even when nfl_mcp has no schedule cached for the week.
@@ -30,15 +54,21 @@ async def compare_projections(league_id: str, rows: list[dict], week: int | None
                                                     and int(r["bye_week"]) == int(wk))
         mine = None if on_bye else (p.get("projected_points") if p else None)
         theirs = None if on_bye else r["yahoo_projection"]
+        p = p or {}
         out.append({
             "slot": r["slot"], "name": r["name"], "team": r["team"], "position": r["position"],
+            "player_id": r.get("player_id"),
             "injury": r["injury"], "bye_week": r.get("bye_week"), "on_bye": on_bye,
             "yahoo_projection": theirs, "our_projection": mine,
-            "model_projection": p.get("model_projection") if p else None,
-            "sleeper_projection": p.get("sleeper_projection") if p else None,
-            "projection_source": p.get("projection_source") if p else None,
+            "model_projection": None if on_bye else p.get("model_projection"),
+            "sleeper_projection": None if on_bye else p.get("sleeper_projection"),
+            "projection_source": "bye" if on_bye else p.get("projection_source"),
+            "nfl_injury_status": p.get("injury_status"), "nfl_injury_source": p.get("injury_source"),
+            "practice_status": p.get("practice_status"), "gameday_status": p.get("gameday_status"),
+            "engine_bye_status": p.get("bye_status"),
             "gap": round(mine - theirs, 1) if mine is not None and theirs is not None else None,
         })
+    warnings = _without_bye_players(list(res.get("warnings") or []), {x["name"] for x in out if x["on_bye"]})
     started = [x for x in out if x["slot"] not in ("BN", "IR")]
     both = [x for x in started if x["gap"] is not None]
     if res.get("success") is False:
