@@ -6,9 +6,9 @@ tagged ``single_source`` and ``status: "lead"``. Per the kernel's verify-before-
 rule, an injury or role claim needs a second independent source before it moves a call.
 
 Handles are configuration, not code: set ``NFL_MCP_BLUESKY_HANDLES`` (comma separated).
-``DEFAULT_HANDLES`` below came from one March-2025 article and were NOT verified live (the
-build sandbox cannot reach Bluesky); run ``verify_handles`` first and delete any that do not
-resolve to the person you expect.
+``DEFAULT_HANDLES`` were confirmed to resolve on 2026-10-27 (``verify_handles``): Ian Rapoport,
+and "NFL News Poster", a manually maintained account that reposts reporters from Twitter - so
+treat its posts as second-hand. Re-run ``verify_handles`` if a handle stops returning posts.
 """
 from __future__ import annotations
 
@@ -20,8 +20,7 @@ from ..config import create_http_client
 
 API = "https://public.api.bsky.app/xrpc"
 
-# UNVERIFIED leads (Awful Announcing, 2025-03-10). Confirm with verify_handles before relying on them.
-DEFAULT_HANDLES = ["rapsheet1.bsky.social", "diannarussini.bsky.social"]
+DEFAULT_HANDLES = ["rapsheet.bsky.social", "nflnewsposter.bsky.social"]
 
 
 def configured_handles() -> list[str]:

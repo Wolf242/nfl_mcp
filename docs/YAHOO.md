@@ -79,6 +79,7 @@ names, add/drop/watch links with a `crumb` token) before turning them into test 
 * Projections: the lineup tools use nfl_mcp's own projections, never Yahoo's. `get_yahoo_projection_comparison` shows Yahoo's
   per-player projection beside ours (comparison only; a test pins that the optimizer does not read it). Yahoo's figure is the
   current week's, and is blank for players on bye.
-* Bluesky handles in `DEFAULT_HANDLES` came from one 2025 article and were never resolved live. Run `verify_news_handles`.
-  X/Twitter has no free read API, so it is not included.
+* Bluesky handles in `DEFAULT_HANDLES` (`rapsheet.bsky.social`, Ian Rapoport; `nflnewsposter.bsky.social`, a manually
+  maintained account that reposts reporters from Twitter, so second-hand) were resolved live on 2026-10-27. Run
+  `verify_news_handles` if one stops returning posts. X/Twitter has no free read API, so it is not included.
 * The API route does not implement matchups, free agents or transactions.
