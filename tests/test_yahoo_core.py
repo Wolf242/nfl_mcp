@@ -210,3 +210,10 @@ def test_defense_on_bye_is_flagged_and_has_no_player_id():
     d = parsers.parse_roster(html)["slots"][0]
     assert (d["slot"], d["name"], d["team"], d["position"], d["yahoo_id"]) == ("DEF", "Texans", "HOU", "DEF", None)
     assert d["game"]["bye"] is True
+
+
+def test_cdp_url_comes_from_env_and_is_not_default(monkeypatch):
+    from nfl_mcp.yahoo.sources import BrowserSource
+    assert BrowserSource().cdp_url is None
+    monkeypatch.setenv("YAHOO_CDP_URL", "http://localhost:9222")
+    assert BrowserSource().cdp_url == "http://localhost:9222"

@@ -19,6 +19,8 @@ async def main() -> None:
         page = await ctx.new_page()
         await page.goto("https://login.yahoo.com/")
         print(f"Sign in to Yahoo in the window, then close it. Profile: {prof}")
+        print("If Google says 'This browser or app may not be secure', use Yahoo's own email/password "
+              "or emailed-code sign-in here, or use the Chrome attach route in docs/YAHOO.md.")
         await ctx.wait_for_event("close", timeout=0)
 
 

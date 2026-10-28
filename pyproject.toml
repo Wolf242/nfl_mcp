@@ -22,6 +22,7 @@ classifiers = [
 ]
 dependencies = [
     "fastmcp>=4.0.11",
+    "tzdata; sys_platform == 'win32'",
     "uvicorn>=0.54.0",
     "httpx>=0.28.1,<1",
     "beautifulsoup4>=4.15.0",

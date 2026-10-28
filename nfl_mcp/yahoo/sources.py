@@ -62,12 +62,16 @@ class BrowserSource:
     ever sees or stores it)."""
 
     def __init__(self, profile_dir: str | None = None, min_interval: float = 1.5,
-                 ttl: float = 60.0, headless: bool = True):
+                 ttl: float = 60.0, headless: bool = True, cdp_url: str | None = None):
         self.profile_dir = profile_dir or os.getenv("YAHOO_PROFILE_DIR") or str(
             Path.home() / ".nfl_mcp" / "yahoo-profile")
         self.min_interval, self.ttl, self.headless = min_interval, ttl, headless
+        # YAHOO_CDP_URL: attach to a normal Chrome YOU started with --remote-debugging-port and
+        # signed in to by hand (works with "Sign in with Google", which blocks automated browsers).
+        self.cdp_url = cdp_url or os.getenv("YAHOO_CDP_URL")
         self._ctx = None
         self._pw = None
+        self._browser = None
         self._lock = asyncio.Lock()
         self._last = 0.0
         self._cache: dict[str, tuple[float, str]] = {}
@@ -76,8 +80,13 @@ class BrowserSource:
         if self._ctx is None:
             from playwright.async_api import async_playwright  # optional dependency
             self._pw = await async_playwright().start()
-            self._ctx = await self._pw.chromium.launch_persistent_context(
-                self.profile_dir, headless=self.headless)
+            if self.cdp_url:
+                self._browser = await self._pw.chromium.connect_over_cdp(self.cdp_url)
+                self._ctx = (self._browser.contexts[0] if self._browser.contexts
+                             else await self._browser.new_context())
+            else:
+                self._ctx = await self._pw.chromium.launch_persistent_context(
+                    self.profile_dir, headless=self.headless)
         return self._ctx
 
     async def fetch(self, league: str, page: str, **params) -> str:
@@ -106,11 +115,12 @@ class BrowserSource:
         return html
 
     async def close(self):
-        if self._ctx is not None:
+        # An attached (CDP) browser belongs to the user: disconnect, never close it.
+        if self._ctx is not None and self._browser is None:
             await self._ctx.close()
         if self._pw is not None:
             await self._pw.stop()
-        self._ctx = self._pw = None
+        self._ctx = self._pw = self._browser = None
 
 
 def default_source():

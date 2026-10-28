@@ -26,6 +26,19 @@ unchanged. Seven extra tools are Yahoo/news specific (`get_yahoo_waiver_order`, 
 | **Saved pages** | set `YAHOO_SNAPSHOT_DIR=/path` with pages saved by `selfcheck --save` (or by hand) | simplest; nothing logs in |
 | **Official API** | register an app at developer.yahoo.com (Fantasy Sports, **read** permission), set `YAHOO_CLIENT_ID`, `YAHOO_CLIENT_SECRET`, `YAHOO_ACCESS=api` | **experimental, unverified** against live Yahoo; implements standings + rosters only; earlier tests of a new app returned `additional_authorization_required` |
 
+**If Google blocks the sign-in** ("This browser or app may not be secure"): the `login` window is an automated browser and Google
+refuses it. Either use Yahoo's own email/password or emailed-code sign-in in that window, or attach to your normal Chrome:
+
+```
+# Windows PowerShell - start a separate Chrome profile with a local debug port, and sign in to Yahoo there by hand
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$HOME\.nfl_mcp\chrome-profile"
+$env:YAHOO_CDP_URL = "http://localhost:9222"
+py -m nfl_mcp.yahoo.selfcheck 1234567 9 --save .\yahoo-pages
+```
+
+Leave that Chrome window open while the server runs; nfl_mcp opens its own tabs in it, reads only the allow-listed pages, and
+never closes your browser. The debug port is reachable only from your computer; close that Chrome when you are done.
+
 Docker: `Dockerfile.yahoo` bundles Chromium. Do the one-time sign-in on a machine with a display, then mount the profile:
 `docker run -p 9000:9000 -v $HOME/.nfl_mcp:/root/.nfl_mcp nfl_mcp_yahoo`. A profile created on another OS may need a fresh
 sign-in inside the container's Chromium version.
