@@ -115,7 +115,9 @@ def fake_compare(gap=5.0, players=None):
 async def fake_targets(**kw):
     return {"success": True, "targets": [{"name": "Wire Guy", "position": "DEF", "team": "PIT",
                                           "projected_points": 7.0, "upgrade_points": 6.7, "verdict": "add",
-                                          "waiver_strategy": {"recommendation": "claim_now"}}]}
+                                          "waiver_strategy": {"recommendation": "add_now"}},
+                                         {"name": "WSH", "position": "DEF", "team": "WSH", "upgrade_points": 5.0,
+                                          "waiver_strategy": {"recommendation": "add_now"}}]}
 
 
 async def fake_posts(handles, hours, limit, watch):
@@ -148,7 +150,12 @@ async def test_checkin_flags_the_defense_on_bye_and_reads_the_defense_wire(pages
     assert list(r["wire"]["positions"]) == ["DEF"]
     tags = {p["tag"] for p in r["wire"]["positions"]["DEF"]}
     assert tags and all(t.startswith("W (") for t in tags)
-    assert r["wire"]["targets"][0]["name"] == "Wire Guy"
+    t = r["wire"]["targets"][0]
+    assert t["name"] == "Wire Guy" and t["yahoo_tag"].startswith("W (")
+    # nfl_mcp says add now; Yahoo's tag is a waiver claim, so the check-in says Yahoo's tag wins
+    assert any("Wire Guy" in w and "waiver claim" in w for w in r["warnings"])
+    # Sleeper writes Washington as WSH, Yahoo as WAS; the tag must still be found, and from outside the top few
+    assert r["wire"]["targets"][1]["yahoo_tag"].startswith("W (")
 
 
 @pytest.mark.asyncio

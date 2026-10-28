@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 
+from .idmap import norm_team
 from .parsers import IR_ELIGIBLE
 from .provider import slot_label
 
@@ -136,6 +137,26 @@ def _wire_row(p: dict) -> dict:
             "tag": tag, "injury": p.get("injury")}
 
 
+def _tag_targets(wire: dict, warnings: list[str], index: dict | None = None) -> None:
+    """Put Yahoo's own FA / W tag on each target, and say so when it contradicts the advice.
+
+    The targets are ranked from Sleeper's player pool, which does not know that Yahoo holds a
+    player on waivers: "add now" there can be a claim-only ``W (date)`` here. Yahoo's tag wins.
+    """
+    by_name, by_team = {}, {}
+    # ``index`` holds every row read from Yahoo; the displayed wire is only the top few.
+    for rows in (index or wire["positions"]).values():
+        for r in rows:
+            by_name[(r["name"] or "").lower()] = r["tag"]
+            by_team[(r["position"], norm_team(r["team"]))] = r["tag"]  # Sleeper WSH == Yahoo WAS
+    for t in wire["targets"]:
+        tag = by_name.get((t["name"] or "").lower()) or by_team.get((t["position"], norm_team(t["team"])))
+        t["yahoo_tag"] = tag
+        if tag and tag.startswith("W") and t.get("waiver_recommendation") in ("add_now", "add"):
+            warnings.append(f"{t['name']}: nfl_mcp says add now, but Yahoo lists {tag}, a waiver claim and not an "
+                            "instant add. Follow Yahoo's tag.")
+
+
 async def build_checkin(
     prov, league_id: str, mid: str, week: int, *,
     compare: Callable[..., Awaitable[dict]],
@@ -180,9 +201,12 @@ async def build_checkin(
     positions = wire_positions(problems, outlook)
 
     wire: dict = {"positions": {}, "targets": []}
+    wire_index: dict[str, list[dict]] = {}
     for pos in positions:
         try:
-            wire["positions"][pos] = [_wire_row(p) for p in (await prov.get_free_agents(pos))[:wire_depth]]
+            rows = [_wire_row(p) for p in await prov.get_free_agents(pos)]
+            wire_index[pos] = rows
+            wire["positions"][pos] = rows[:wire_depth]
         except Exception as e:  # one page failing should not sink the check-in
             warnings.append(f"Could not read the {pos} wire: {e}")
     if targets is not None:
@@ -195,6 +219,7 @@ async def build_checkin(
                 "verdict": x.get("verdict"),
                 "waiver_recommendation": (x.get("waiver_strategy") or {}).get("recommendation"),
             } for x in (t.get("targets") or [])]
+            _tag_targets(wire, warnings, wire_index)
             if t.get("success") is False:
                 warnings.append("get_waiver_targets failed: " + str(t.get("error")))
             else:
