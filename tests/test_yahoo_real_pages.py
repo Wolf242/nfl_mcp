@@ -63,3 +63,21 @@ def test_settings_page_yields_scoring_that_matches_bfs():
     assert len(rows) > 50
     live = parse_settings_rows(rows)
     assert live and not diff_from_bfs(live)
+
+
+def test_matchup_totals_come_from_the_starters_table_not_the_bench_sum():
+    m = parsers.parse_matchup(_page("matchup"))
+    home, away = m["home"], m["away"]
+    assert home["team"]["name"].startswith("Team ") and away["team"]["name"].startswith("Team ")
+    assert (home["total_pts"], home["total_proj"]) == (99.52, 141.60)
+    assert (away["total_pts"], away["total_proj"]) == (120.66, 124.65)
+    assert len(home["starters"]) == 9 and len(home["bench"]) == 8
+    # starters' points add up to the displayed total
+    assert round(sum(p["points"] for p in home["starters"]), 2) == home["total_pts"]
+
+
+def test_matchup_empty_bench_slot_is_flagged_not_an_unnamed_player():
+    m = parsers.parse_matchup(_page("matchup"))
+    empties = [p for p in m["home"]["bench"] if p.get("empty")]
+    assert len(empties) == 1 and empties[0]["name"] is None
+    assert all(p["name"] for p in m["home"]["starters"] + m["away"]["starters"])

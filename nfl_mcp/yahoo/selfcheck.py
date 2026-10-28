@@ -1,4 +1,5 @@
-"""Live smoke test: ``python -m nfl_mcp.yahoo.selfcheck <league_number> <my_mid> [--save DIR]``.
+"""Live smoke test: ``python -m nfl_mcp.yahoo.selfcheck <league_number> <my_mid> [--save DIR] [--week N]``
+(``--week`` defaults to the current NFL week).
 
 Reads your league through the configured source (logged-in browser, or YAHOO_SNAPSHOT_DIR),
 prints what parsed, and reports anything that did not map. ``--save DIR`` also writes the raw
@@ -47,6 +48,15 @@ async def main(argv: list[str]) -> int:
     fa = await prov.get_free_agents("RB")
     print("first RBs on the wire:", [(p["name"], p["availability"]["state"], p["availability"]["clears"])
                                      for p in fa[:5]])
+    week = argv[argv.index("--week") + 1] if "--week" in argv else (await sleeper_tools.get_nfl_state()).get("nfl_state", {}).get("week")
+    if week:
+        mu = parsers.parse_matchup(await grab("matchup", week=int(week), mid1=mid))
+        for side in (mu["home"], mu["away"]):
+            rows = side["starters"] + side["bench"]
+            bad = [p.get("name") for p in rows if not p.get("empty") and prov._sid(p)[0] is None]
+            print(f"matchup week {week}: {(side['team'] or {}).get('name')!r} total={side.get('total_pts')} "
+                  f"proj={side.get('total_proj')} starters={len(side['starters'])} bench={len(side['bench'])} "
+                  f"UNMAPPED={bad or 'none'}")
     await grab("settings"), await grab("standings")
     await grab("transactions", transactionsfilter="all")
     await grab("transactions", transactionsfilter="waiver")

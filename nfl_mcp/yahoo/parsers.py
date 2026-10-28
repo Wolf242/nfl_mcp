@@ -169,6 +169,13 @@ def parse_players(html: str) -> dict:
     return {"players": out}
 
 
+def _matchup_player(cell) -> dict:
+    if _text(cell).lower().startswith("(empty)"):
+        return {"yahoo_id": None, "name": None, "team": None, "position": None, "injury": None,
+                "game": None, "empty": True}
+    return _player_from_cell(cell)
+
+
 def parse_matchup(html: str) -> dict:
     """Matchup page -> ``{"home": {...}, "away": {...}}`` (``home`` = the page's left team)."""
     soup = BeautifulSoup(html, "lxml")
@@ -184,13 +191,14 @@ def parse_matchup(html: str) -> dict:
                 continue
             pos = _text(cells[4])
             if pos.lower() == "total":
-                sides[0]["total_proj"] = _float(_text(cells[2]))
-                sides[0]["total_pts"] = _float(_text(cells[3]))
-                sides[1]["total_pts"] = _float(_text(cells[7]))
-                sides[1]["total_proj"] = _float(_text(cells[8]))
+                if key == "starters":  # the bench table's Total row is only the bench points sum
+                    sides[0]["total_proj"] = _float(_text(cells[2]))
+                    sides[0]["total_pts"] = _float(_text(cells[3]))
+                    sides[1]["total_pts"] = _float(_text(cells[7]))
+                    sides[1]["total_proj"] = _float(_text(cells[8]))
                 continue
-            left = _player_from_cell(cells[1])
-            right = _player_from_cell(cells[9])
+            left = _matchup_player(cells[1])
+            right = _matchup_player(cells[9])
             left.update(slot=pos, projected=_float(_text(cells[2])), points=_float(_text(cells[3])))
             right.update(slot=_text(cells[6]) or pos, projected=_float(_text(cells[8])),
                          points=_float(_text(cells[7])))
