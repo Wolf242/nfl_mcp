@@ -81,3 +81,16 @@ def test_matchup_empty_bench_slot_is_flagged_not_an_unnamed_player():
     empties = [p for p in m["home"]["bench"] if p.get("empty")]
     assert len(empties) == 1 and empties[0]["name"] is None
     assert all(p["name"] for p in m["home"]["starters"] + m["away"]["starters"])
+
+
+def test_te_availability_is_read_past_the_extra_highlight_column():
+    players = parsers.parse_players(_page("players_te"))["players"]
+    assert len(players) == 25 and all(p["position"] == "TE" for p in players)
+    assert all(p["availability"]["state"] == "W" and p["availability"]["clears"] for p in players)
+
+
+def test_team_defenses_on_the_wire_are_listed_with_their_team_code():
+    players = parsers.parse_players(_page("players_def"))["players"]
+    assert len(players) == 21 and all(p["position"] == "DEF" and p["team"] for p in players)
+    assert all(p["yahoo_id"] is None for p in players)  # ids are never taken from add links
+    assert all(p["availability"]["state"] == "W" for p in players)

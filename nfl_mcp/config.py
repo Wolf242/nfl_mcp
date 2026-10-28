@@ -684,6 +684,7 @@ SAFE_PATTERNS = {
     'team_id': re.compile(r'^[A-Z]{2,4}$'),  # NFL team abbreviations
     'athlete_name': re.compile(r"^[a-zA-Z\s\.\-']+$"),  # Names with common punctuation
     'league_id': re.compile(r'^[0-9]+$'),  # Sleeper league IDs are numeric
+    'yahoo_league_id': re.compile(r'^yahoo:[0-9]+$', re.IGNORECASE),  # a Yahoo league addressed as yahoo:<number>
     'trend_type': re.compile(r'^(add|drop)$'),  # Only valid trend types
 }
 

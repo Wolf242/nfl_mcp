@@ -129,10 +129,17 @@ def parse_roster(html: str) -> dict:
 
 def _find_player_cell(tr):
     """The td holding the player's profile link (``/nfl/players/<id>``, not ``/news``)."""
-    for td in tr.find_all("td", recursive=False):
+    tds = tr.find_all("td", recursive=False)
+    for td in tds:
         for a in td.find_all("a", href=True):
             if re.search(r"/nfl/players/\d+$", a["href"]):
                 return td
+    # A team defense has no player profile: its name links to the team page instead.
+    for td in tds:
+        if "player" in (td.get("class") or []):
+            for a in td.select("a.name[href]"):
+                if re.search(r"/nfl/teams/[^/]+/?$", a["href"]):
+                    return td
     return None
 
 
@@ -149,12 +156,17 @@ def parse_players(html: str) -> dict:
         rows = [tr for tr in t.select("tbody tr") if _find_player_cell(tr) is not None]
         if not rows:
             continue
+        # Some positions (TE) put a Highlight column between the player and Roster Status,
+        # so find the status column by its header rather than assuming it is next door.
+        head = [[_text(c) for c in tr.find_all(["th", "td"])] for tr in t.select("thead tr")]
+        status_col = head[-1].index("Roster Status") if head and "Roster Status" in head[-1] else None
         for tr in rows:
             cells = tr.find_all("td", recursive=False)
             pcell = _find_player_cell(tr)
             p = _player_from_cell(pcell)
             idx = cells.index(pcell)
-            avail_txt = _text(cells[idx + 1]) if idx + 1 < len(cells) else ""
+            col = status_col if status_col is not None and head and len(cells) == len(head[-1]) else idx + 1
+            avail_txt = _text(cells[col]) if col < len(cells) else ""
             m = _WAIVER_TAG.match(avail_txt)
             if m:
                 p["availability"] = {"state": "W", "clears": m.group("date"), "owner": None}
