@@ -33,7 +33,19 @@ WRITE_WORDS = re.compile(
 )
 
 _LEAGUE_PATH = re.compile(r"^/f1/(?P<league>\d+)(?:/(?P<rest>[^/?#]*))?/?$")
-_API_PATH = re.compile(r"^/fantasy/v2/(?:league|team|game|users|players)/", re.IGNORECASE)
+
+# API resources that may be read: the league's own collections and a team's roster/matchups/stats.
+# Anything else (including any sub-resource we have not named) is refused. The key must be
+# ``<game>.l.<league>`` / ``<game>.l.<league>.t.<team>``; ``;params`` are Yahoo's filters.
+_API_PATH = re.compile(
+    r"^/fantasy/v2/(?:"
+    r"league/(?P<lk>[a-z0-9]+\.l\.(?P<lid>\d+))"
+    r"(?:/(?:standings|scoreboard|settings|teams|transactions|players|draftresults)(?:;[^/]*)?)?"
+    r"|team/(?P<tk>[a-z0-9]+\.l\.(?P<tid>\d+)\.t\.\d+)"
+    r"(?:/(?:roster(?:/players)?|matchups|stats)(?:;[^/]*)?)?"
+    r")$",
+    re.IGNORECASE,
+)
 
 
 class WriteBlocked(Exception):
@@ -48,11 +60,13 @@ def check_read_only(url: str, *, league_id: str | None = None) -> str:
     if re.search(r"(^|[&?])crumb=", u.query, re.IGNORECASE):
         raise WriteBlocked("URL carries a crumb token (state-changing link)")
     if u.hostname == "fantasysports.yahooapis.com":
-        if not _API_PATH.match(u.path):
+        m = _API_PATH.match(u.path)
+        if not m:
             raise WriteBlocked(f"API path not allowed: {u.path}")
-        if re.search(r"/(transactions|players)/[^/]*;?.*(add|drop)", u.path, re.IGNORECASE):
-            # Reading /league/<k>/transactions is fine; POST-style sub-resources are not.
-            pass
+        if league_id and (m.group("lid") or m.group("tid")) != str(league_id):
+            raise WriteBlocked(f"other league: {m.group('lid') or m.group('tid')}")
+        if WRITE_WORDS.search(u.path):
+            raise WriteBlocked(f"write verb in API path: {u.path}")
         return url
     m = _LEAGUE_PATH.match(u.path)
     if not m:
@@ -60,6 +74,8 @@ def check_read_only(url: str, *, league_id: str | None = None) -> str:
     if league_id and m.group("league") != str(league_id):
         raise WriteBlocked(f"other league: {m.group('league')}")
     rest = (m.group("rest") or "").lower()
+    if WRITE_WORDS.search(rest):
+        raise WriteBlocked(f"write verb in page name: /{rest}")
     if rest == "" or rest.isdigit() or rest in READ_PAGES:
         return url
     raise WriteBlocked(f"page not on the read allow-list: /{rest}")

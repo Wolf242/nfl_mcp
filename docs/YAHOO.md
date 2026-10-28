@@ -9,8 +9,10 @@ unchanged. Seven extra tools are Yahoo/news specific (`get_yahoo_waiver_order`, 
 
 * **Read-only.** There is no add, drop, claim, trade or lineup-edit code in this package. `nfl_mcp/yahoo/guard.py`
   allow-lists the pages that may be loaded (roster, matchup, players, standings, transactions, settings) and rejects any
-  URL with a write verb or a `crumb` token. Yahoo's add/drop links are plain GETs, so the allow-list - not "GET only" - is what
-  protects the roster. `tests/test_yahoo_core.py` pins this.
+  URL with a write verb or a `crumb` token. API requests are held to the same rule: only the league's own read collections and a
+  team's roster/matchups/stats, for your league id, are allowed. Yahoo's add/drop links are plain GETs, so the allow-list - not
+  "GET only" - is what protects the roster. The guard only constrains nfl_mcp: a Chrome you leave signed in with the debug port
+  open can still be driven by any program on your computer, so close it when you are done. `tests/test_yahoo_core.py` pins this.
 * **No credentials in code.** Browser route: you sign in yourself; only the browser profile (cookies) is kept. API route: client
   id/secret come from your environment; the token file is mode 600.
 * **News is leads.** Bluesky posts are tagged `single_source` / `lead`. Confirm player, body part, status and date in a second

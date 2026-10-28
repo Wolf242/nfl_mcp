@@ -22,6 +22,9 @@ L = "1234567"
     f"https://football.fantasysports.yahoo.com/f1/{L}/transactions?transactionsfilter=waiver",
     f"https://football.fantasysports.yahoo.com/f1/{L}/settings",
     "https://fantasysports.yahooapis.com/fantasy/v2/league/nfl.l.1234567/standings",
+    "https://fantasysports.yahooapis.com/fantasy/v2/league/nfl.l.1234567/players;status=A;position=RB",
+    "https://fantasysports.yahooapis.com/fantasy/v2/league/nfl.l.1234567/transactions",
+    "https://fantasysports.yahooapis.com/fantasy/v2/team/nfl.l.1234567.t.9/roster/players",
 ])
 def test_guard_allows_reads(url):
     assert guard.check_read_only(url, league_id=L) == url
@@ -37,6 +40,15 @@ def test_guard_allows_reads(url):
     "https://evil.example.com/f1/1234567/9",
     "http://football.fantasysports.yahoo.com/f1/1234567/9",
     "https://fantasysports.yahooapis.com/fantasy/v2/admin/league",
+    "https://fantasysports.yahooapis.com/fantasy/v2/league/nfl.l.999/standings",  # another league
+    "https://fantasysports.yahooapis.com/fantasy/v2/team/nfl.l.999.t.1/roster",
+    "https://fantasysports.yahooapis.com/fantasy/v2/league/nfl.l.1234567/transactions/add",
+    "https://fantasysports.yahooapis.com/fantasy/v2/league/nfl.l.1234567/players/dropplayer",
+    "https://fantasysports.yahooapis.com/fantasy/v2/league/nfl.l.1234567/waiverclaim",
+    "https://fantasysports.yahooapis.com/fantasy/v2/team/nfl.l.1234567.t.9/roster/edit",
+    "https://fantasysports.yahooapis.com/fantasy/v2/users;use_login=1/games",
+    f"https://football.fantasysports.yahoo.com/f1/{L}/swapplayers",
+    f"https://football.fantasysports.yahoo.com/f1/{L}/acceptTrade",
 ])
 def test_guard_blocks_everything_else(url):
     with pytest.raises(guard.WriteBlocked):
@@ -214,6 +226,7 @@ def test_defense_on_bye_is_flagged_and_has_no_player_id():
 
 def test_cdp_url_comes_from_env_and_is_not_default(monkeypatch):
     from nfl_mcp.yahoo.sources import BrowserSource
+    monkeypatch.delenv("YAHOO_CDP_URL", raising=False)  # may be exported for real use
     assert BrowserSource().cdp_url is None
     monkeypatch.setenv("YAHOO_CDP_URL", "http://localhost:9222")
     assert BrowserSource().cdp_url == "http://localhost:9222"
