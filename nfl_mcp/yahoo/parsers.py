@@ -23,7 +23,8 @@ from bs4 import BeautifulSoup
 _PLAYER_ID = re.compile(r"/nfl/players/(\d+)")
 _TEAM_HREF = re.compile(r"/f1/(\d+)/(\d+)$")
 _APID = re.compile(r"apid=(\d+)")
-_TEAM_POS = re.compile(r"^\s*([A-Za-z]{2,4})\s*-\s*([A-Z/]+)\s*$")
+# Spaces around the hyphen are required: injury badges such as "IR-R" or "PUP-R" share the span class.
+_TEAM_POS = re.compile(r"^\s*([A-Za-z]{2,4})\s+-\s+([A-Z/]+)\s*$")
 _WAIVER_TAG = re.compile(r"^W\s*\((?P<date>[A-Za-z]{3}\s+\d{1,2})\)$")
 IR_ELIGIBLE = {"IR", "IR-R", "PUP-R", "NFI-R", "O"}
 INJURY_TAGS = {"Q", "D", "O", "IR", "IR-R", "PUP-R", "NFI-R", "SUSP", "COV", "NA"}
@@ -228,7 +229,9 @@ def parse_standings(html: str) -> dict:
         cells = tr.find_all("td", recursive=False)
         if len(cells) < len(heads):
             continue
-        a = tr.find("a", href=_TEAM_HREF)
+        # The first team link wraps the logo image and has no text; the name link follows it.
+        links = tr.find_all("a", href=_TEAM_HREF)
+        a = next((x for x in links if _text(x)), links[0] if links else None)
         mid = _TEAM_HREF.search(a["href"]).group(2) if a else None
         wlt = _text(cells[col.get("w-l-t", 2)]).split("-")
         def num(k, cells=cells):

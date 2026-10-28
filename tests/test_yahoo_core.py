@@ -217,3 +217,21 @@ def test_cdp_url_comes_from_env_and_is_not_default(monkeypatch):
     assert BrowserSource().cdp_url is None
     monkeypatch.setenv("YAHOO_CDP_URL", "http://localhost:9222")
     assert BrowserSource().cdp_url == "http://localhost:9222"
+
+
+def test_injury_badge_in_the_team_pos_span_class_is_not_a_team_and_position():
+    html = ('<td class="player"><a class="Nowrap name" href="https://sports.yahoo.com/nfl/players/1">A Player</a>'
+            '<span class="ysf-player-status Fz-xxs"><span title="IR-Return">IR-R</span></span>'
+            '<span class="Fz-xxs">NO - WR</span></td>')
+    from bs4 import BeautifulSoup
+    p = parsers._player_from_cell(BeautifulSoup(html, "lxml").td)
+    assert (p["team"], p["position"], p["injury"]) == ("NO", "WR", "IR-R")
+
+
+def test_standings_name_skips_the_text_free_logo_link():
+    row = ('<tr><td>1</td><td><a href="/f1/1234567/9"><img alt="logo"></a>'
+           '<a href="https://football.fantasysports.yahoo.com/f1/1234567/9">Team Nine</a></td>'
+           '<td>6-1-0</td><td>1</td><td>2</td><td>W-1</td><td>6</td><td>26</td></tr>')
+    html = fx.standings_html([]).replace("</tbody>", row + "</tbody>")
+    t = parsers.parse_standings(html)["teams"][0]
+    assert (t["name"], t["mid"], t["waiver"]) == ("Team Nine", "9", 6)
