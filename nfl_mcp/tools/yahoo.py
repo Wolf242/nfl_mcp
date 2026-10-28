@@ -204,7 +204,7 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
     mid, err = _mid(roster_id)
     if err:
         return err
-    from .. import projections, ros, waiver_target_tools
+    from .. import injury_service, projections, ros, waiver_target_tools
     from ..database import get_shared_db
     from ..week_context import resolve_season_week
     from ..yahoo.checkin import build_checkin
@@ -213,13 +213,22 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
     if not week:
         return {"success": False, "error": "Could not determine the NFL week; pass week."}
 
+    db = get_shared_db()
+
     async def schedules(weeks: list[int]) -> dict:
-        return await ros.schedules_for(get_shared_db(), int(season), weeks)
+        return await ros.schedules_for(db, int(season), weeks)
+
+    async def refresh_injuries(teams: list[str]):
+        return await injury_service.get_injury_reports_bounded(teams=teams, db=db)
+
+    async def project(players: list[dict], **kw) -> dict:
+        return await projections.project_players(players, db=db, **kw)
 
     return await build_checkin(
         await get_provider(league_id), league_id, mid, int(week), compare=compare_projections,
-        project=projections.project_players, targets=waiver_target_tools.get_waiver_targets,
-        posts=news_social.get_insider_posts, schedules=schedules if season else None)
+        project=project, targets=waiver_target_tools.get_waiver_targets,
+        posts=news_social.get_insider_posts, schedules=schedules if season else None,
+        refresh_injuries=refresh_injuries)
 
 
 @timing_decorator("verify_news_handles", tool_type="yahoo")

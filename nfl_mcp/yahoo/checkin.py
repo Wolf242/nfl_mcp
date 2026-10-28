@@ -311,6 +311,31 @@ async def _project_wire(project, league_id: str, week: int, pos: str, rows: list
     return sorted(rows, key=lambda r: (r["our_projection"] is None, -(r["our_projection"] or 0.0)))
 
 
+def wire_reasons(problems: list[dict], outlook: list[dict]) -> dict[str, list[str]]:
+    """Why each wire position is listed, so a future-bye position is not read as this week's lineup."""
+    out: dict[str, list[str]] = {}
+
+    def add(pos: str | None, why: str):
+        if pos and pos.upper() in WIRE_POSITIONS:
+            out.setdefault(pos.upper(), [])
+            if why not in out[pos.upper()]:
+                out[pos.upper()].append(why)
+
+    for p in problems:
+        if p["type"] in ("starter_on_bye", "starter_out", "starter_doubtful"):
+            add(p["position"], p["detail"])
+        elif p["type"] == "empty_starting_slot":
+            for pos in FLEX_POSITIONS.get(p["slot"], [p["slot"]]):
+                add(pos, p["detail"])
+    for w in outlook:
+        if w["starters_on_bye"] >= STARTERS_ON_BYE_FLAG:
+            for pos in w["starters_on_bye_positions"]:
+                add(pos, f"week {w['week']}: {w['starters_on_bye']} starters on bye (depth for a later week)")
+        if any(f.startswith("fewer than") for f in w["flags"]):
+            add("RB", f"week {w['week']}: fewer than {MIN_ACTIVE_RBS} active RBs (depth for a later week)")
+    return out
+
+
 def claim_timing(wire: dict, today: date | None = None) -> list[str]:
     """When the ``W (date)`` claims on the displayed wire clear, relative to today."""
     today = today or date.today()
@@ -377,6 +402,7 @@ async def build_checkin(
     targets: Callable[..., Awaitable[dict]] | None = None,
     posts: Callable[..., Awaitable[dict]] | None = None,
     schedules: Callable[[list[int]], Awaitable[dict]] | None = None,
+    refresh_injuries: Callable[[list[str]], Awaitable[tuple]] | None = None,
     today: date | None = None,
     wire_depth: int = 6,
 ) -> dict:
@@ -409,6 +435,17 @@ async def build_checkin(
 
     slots = await prov.data.roster(mid)
     rows = await prov.get_projection_inputs(mid)
+    # nfl_mcp's own injury reports for the roster's teams, so Yahoo's tags have something to be checked
+    # against. Bounded: on a timeout the stored reports are used and the result says so.
+    if refresh_injuries is not None:
+        teams = sorted({t for t in (normalize_team(r.get("team")) for r in rows if r["position"] != "DEF") if t})
+        try:
+            _, meta = await refresh_injuries(teams)
+            if meta.get("partial"):
+                warnings.append("nfl_mcp's injury refresh timed out, so the cross-check uses stored injury reports "
+                                "that may be out of date.")
+        except Exception as e:
+            warnings.append(f"Could not refresh nfl_mcp's injury reports ({e}); injury tags may be unverified.")
     cmp = await compare(league_id, rows, week)
     warnings += cmp.get("warnings") or []
     totals = cmp["starter_totals"]
@@ -427,7 +464,7 @@ async def build_checkin(
             warnings.append(f"Week {w['week']}: " + "; ".join(w["flags"]) + ".")
     positions = wire_positions(problems, outlook)
 
-    wire: dict = {"positions": {}, "targets": [], "timing": []}
+    wire: dict = {"positions": {}, "reasons": wire_reasons(problems, outlook), "targets": [], "timing": []}
     wire_index: dict[str, list[dict]] = {}
     for pos in positions:
         try:

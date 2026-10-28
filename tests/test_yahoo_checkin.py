@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nfl_mcp import defaults, projections, ros, sleeper_tools, waiver_target_tools, week_context
+from nfl_mcp import defaults, injury_service, projections, ros, sleeper_tools, waiver_target_tools, week_context
 from nfl_mcp.tools import league as league_tools
 from nfl_mcp.tools import waiver as waiver_tools
 from nfl_mcp.tools import yahoo as tools
@@ -146,6 +146,10 @@ async def fake_schedules(weeks):
     return {w: week_sched(*byes.get(w, ())) for w in weeks}
 
 
+async def fake_refresh(teams=None, db=None, **kw):
+    return [], {"partial": False, "timed_out_sources": [], "stale": False}
+
+
 async def fake_targets(**kw):
     return {"success": True, "targets": [{"name": "Wire Guy", "position": "DEF", "team": "PIT",
                                           "projected_points": 7.0, "upgrade_points": 6.7, "verdict": "add",
@@ -240,6 +244,7 @@ def tool_env(pages, monkeypatch):
     monkeypatch.setattr(compare, "compare_projections", fake_compare())
     monkeypatch.setattr(projections, "project_players", fake_project)
     monkeypatch.setattr(ros, "schedules_for", lambda db, season, weeks: fake_schedules(weeks))
+    monkeypatch.setattr(injury_service, "get_injury_reports_bounded", fake_refresh)
     monkeypatch.setattr(waiver_target_tools, "get_waiver_targets", fake_targets)
     monkeypatch.setattr(news_social, "get_insider_posts", fake_posts)
 
@@ -526,3 +531,69 @@ async def test_without_a_schedule_byes_are_unverified_not_assumed(pages):
         raise RuntimeError("offline")
     r = await build(schedules=boom)
     assert r["success"] and any("NFL schedule unavailable (offline)" in w for w in r["warnings"])
+
+
+# ------------------------------------------------------------------ injury refresh, wire reasons, db handle
+@pytest.mark.asyncio
+async def test_injury_reports_are_refreshed_for_the_rosters_teams_before_projecting(pages):
+    order = []
+
+    async def refresh(teams):
+        order.append(("refresh", teams))
+        return [], {"partial": False}
+
+    async def cmp(league_id, rows, week):
+        order.append(("compare", None))
+        return await fake_compare()(league_id, rows, week)
+    r = await build(refresh_injuries=refresh, compare=cmp)
+    assert r["success"] and [o[0] for o in order] == ["refresh", "compare"]
+    teams = order[0][1]
+    assert teams == sorted(teams) and "SF" in teams and "NO" in teams and "HOU" not in teams  # DEF has no injury feed
+
+
+@pytest.mark.asyncio
+async def test_a_slow_or_failing_injury_refresh_is_a_warning_not_a_failure(pages):
+    async def slow(teams):
+        return [], {"partial": True}
+
+    async def broken(teams):
+        raise RuntimeError("espn down")
+    r = await build(refresh_injuries=slow)
+    assert any("injury refresh timed out" in w for w in r["warnings"])
+    r = await build(refresh_injuries=broken)
+    assert r["success"] and any("Could not refresh nfl_mcp's injury reports (espn down)" in w for w in r["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_each_wire_position_says_why_it_is_listed(pages):
+    r = await build()
+    why = r["wire"]["reasons"]
+    assert any("Texans starts at DEF but is on bye" in x for x in why["DEF"])
+    assert any("week 11" in x and "depth for a later week" in x for x in why["RB"])
+    assert set(why) == set(r["wire"]["positions"])
+
+
+def test_wire_reasons_cover_problems_empty_slots_and_future_holes():
+    probs = checkin.find_problems([S("QB", "A", "QB", injury="O"), S("W/R/T", empty=True)], 8)
+    hole = {"week": 10, "flags": ["fewer than 2 active RBs"], "starters_on_bye": 0, "starters_on_bye_positions": []}
+    why = checkin.wire_reasons(probs, [hole])
+    assert "tagged O" in why["QB"][0] and set(why) == {"QB", "RB", "WR", "TE"}
+    assert why["RB"][0].startswith("No player in the FLEX") and any("week 10" in x for x in why["RB"])
+
+
+@pytest.mark.asyncio
+async def test_the_comparison_hands_the_projection_engine_a_database(monkeypatch):
+    """Without one the engine skips its injury lookup and its cached-schedule bye detection."""
+    seen = {}
+
+    async def fake(players, **kw):
+        seen.update(kw)
+        return {"success": True, "week": 8, "projections": []}
+    monkeypatch.setattr(projections, "project_players", fake)
+    rows = [{"slot": "WR", "name": "A", "team": "KC", "position": "WR", "player_id": "1", "injury": None,
+             "yahoo_projection": 5.0, "bye_week": 12.0}]
+    await compare.compare_projections(LG, rows, 8)
+    assert seen["db"] is not None
+    sentinel = object()
+    await compare.compare_projections(LG, rows, 8, db=sentinel)
+    assert seen["db"] is sentinel

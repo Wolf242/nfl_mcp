@@ -50,7 +50,7 @@ async def test_comparison_lines_up_both_projections_and_skips_bye_players(setup)
 async def test_yahoo_numbers_are_never_passed_into_our_projections(setup):
     await tools.get_yahoo_projection_comparison(LG, "9")
     assert setup["players"] and all("yahoo_projection" not in p for p in setup["players"])
-    assert set(setup["kw"]) <= {"league_id", "week"}
+    assert set(setup["kw"]) <= {"league_id", "week", "db"}  # a database handle is not Yahoo data
 
 
 @pytest.mark.asyncio

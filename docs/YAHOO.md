@@ -22,7 +22,7 @@ Nothing is added, dropped, claimed, traded or changed on Yahoo.
 injury reports (with the week's practice line and the game-day decision), bye weeks against the cached NFL schedule for the next
 four weeks (fetched and cached if missing). Each item is `agree`, `conflict`, `yahoo_only` / `unverified` (no second source) or
 `other_only` (nfl_mcp has an injury report Yahoo does not show). A `yahoo_only` tag is Yahoo's word alone. How much gets verified
-depends on what your server has cached: a cold server verifies byes (the schedule is fetched) but may have no injury reports.
+depends on what your server has cached: byes are checked against a schedule that is fetched if missing, and the check-in asks for fresh injury reports for your roster's teams first (bounded; on a timeout it uses what is stored and says so). Sleeper's injury status is one of nfl_mcp's injury sources, so a tag Sleeper contradicts shows as a `conflict`. Because nfl_mcp's projections now price those injury tags, a Q or D player's projection can sit well below Yahoo's.
 
 No league or team id lives in the repo. Set them in your environment:
 

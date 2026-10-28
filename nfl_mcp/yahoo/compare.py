@@ -27,7 +27,7 @@ def _without_bye_players(warnings: list[str], bye_names: set[str]) -> list[str]:
     return out
 
 
-async def compare_projections(league_id: str, rows: list[dict], week: int | None = None) -> dict:
+async def compare_projections(league_id: str, rows: list[dict], week: int | None = None, db=None) -> dict:
     """``rows`` are :meth:`YahooProvider.get_projection_inputs` rows.
 
     ``our_projection`` is the Sleeper-first blend every other lineup tool uses; ``gap`` is ours
@@ -38,12 +38,16 @@ async def compare_projections(league_id: str, rows: list[dict], week: int | None
     it came from), the week's practice line and the game-day decision, which ``fantasy_checkin``
     uses to cross-check Yahoo's tag.
     """
+    from ..database import get_shared_db
     from ..projections import project_players
 
+    # Without a database the engine skips its injury lookup and its cached-schedule bye detection,
+    # so Q/D/O tags were never priced and nothing was available to cross-check Yahoo's against.
+    db = db if db is not None else get_shared_db()
     live = [r for r in rows if r["slot"] not in NOT_PROJECTED_SLOTS and r.get("team") and r.get("position")]
     res = await project_players(
         [{"name": r["name"], "team": r["team"], "position": r["position"], "player_id": r["player_id"]}
-         for r in live], league_id=league_id, week=week)
+         for r in live], league_id=league_id, week=week, db=db)
     ours = {p.get("player"): p for p in res.get("projections") or []}
     wk = res.get("week")
     out = []
