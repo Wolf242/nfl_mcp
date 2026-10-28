@@ -14,6 +14,7 @@ from ..config import (
     validate_string_input,
 )
 from ..metrics import timing_decorator
+from ..defaults import league_and_roster
 from . import _context
 
 # =============================================================================
@@ -312,6 +313,8 @@ async def analyze_lineup(
     """
     from .. import lineup_tools
 
+    if lineup is None:  # a hypothetical lineup never takes the env roster
+        league_id, roster_id = league_and_roster(league_id, roster_id, user_id)
     try:
         if league_id:
             league_id = validate_string_input(league_id, 'league_id', max_length=20, required=False)

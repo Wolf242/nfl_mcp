@@ -23,6 +23,7 @@ from ..config import (
     validate_string_input,
 )
 from ..metrics import timing_decorator
+from ..defaults import league_and_roster
 from ..teams import normalize_team
 from . import _context
 
@@ -177,6 +178,8 @@ async def analyze_roster_matchups(
     """
     from ..roster_context import load_roster_players
 
+    if not players:  # an ad-hoc list never takes the env league
+        league_id, roster_id = league_and_roster(league_id, roster_id, user_id)
     on_bye = None
     if league_id and (roster_id is not None or user_id):
         try:

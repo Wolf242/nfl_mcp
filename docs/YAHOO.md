@@ -2,8 +2,31 @@
 
 Pass a Yahoo league as `yahoo:<number>` (for BFS: `yahoo:1234567`) to any league tool. Rosters, matchups, league settings and
 users are read from Yahoo and returned in Sleeper's shape, so the lineup, waiver, opponent, bye and injury tools run on it
-unchanged. Eight extra tools are Yahoo/news specific (`get_yahoo_waiver_order`, `plan_yahoo_waiver_sequence`,
-`get_yahoo_free_agents`, `get_yahoo_transactions`, `check_yahoo_scoring`, `get_yahoo_projection_comparison`, `get_insider_posts`, `verify_news_handles`).
+unchanged. Nine extra tools are Yahoo/news specific (`get_yahoo_waiver_order`, `plan_yahoo_waiver_sequence`,
+`get_yahoo_free_agents`, `get_yahoo_transactions`, `check_yahoo_scoring`, `get_yahoo_projection_comparison`, `fantasy_checkin`, `get_insider_posts`, `verify_news_handles`).
+
+## Weekly check-in and per-user defaults
+
+`fantasy_checkin(week=None, league_id=None, roster_id=None)` is one read-only call that returns the league (scoring source and any
+difference from the BFS constants, waiver order and your position), every roster slot with bye week, injury tag and Yahoo vs
+nfl_mcp projection, a `problems` list (starters on bye, empty slots, starters tagged O/D, IR-slot players whose tag is not IR-eligible,
+a full bench), the wire for each problem position (`FA` vs `W (date)`) plus the top `get_waiver_targets`, the opponent (projected
+points, injured starters, byes), the next four weeks of byes (flagging weeks with fewer than two active RBs), reporter posts that name
+your players, and `warnings` for anything single-source or unverified. A team-level projection gap under 12 points is reported as
+noise. Nothing is added, dropped, claimed, traded or changed on Yahoo.
+
+No league or team id lives in the repo. Set them in your environment:
+
+```
+$env:NFL_MCP_DEFAULT_LEAGUE = "yahoo:1234567"   # used when league_id is omitted
+$env:NFL_MCP_MY_ROSTER      = "9"               # your team number, used when roster_id / my_mid is omitted
+```
+
+An explicit argument always wins. With neither an argument nor the variable, the tools return an error naming the variable.
+
+**Yahoo rate limiting.** Yahoo answers a burst of page loads with HTTP 999 "Request denied" (a few bytes that would otherwise parse
+as an empty league). The reader now raises a clear error and refuses further requests for ten minutes. A check-in loads roughly a
+dozen pages; do not run several at once, and do not script repeated runs.
 
 ## Safety contract
 

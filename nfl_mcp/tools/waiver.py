@@ -22,6 +22,7 @@ from ..config import (
     validate_string_input,
 )
 from ..metrics import timing_decorator
+from ..defaults import league_and_roster, missing_league_error
 from . import _context
 
 # =============================================================================
@@ -383,7 +384,7 @@ async def plan_roster_moves(
 
 @timing_decorator("get_waiver_targets", tool_type="waiver")
 async def get_waiver_targets(
-    league_id: str,
+    league_id: str | None = None,
     roster_id: int | None = None,
     user_id: str | None = None,
     week: int | None = None,
@@ -425,6 +426,9 @@ async def get_waiver_targets(
     Example: get_waiver_targets(league_id="123", roster_id=7)
     Example: get_waiver_targets(league_id="123", user_id="456", positions=["RB"])
     """
+    league_id, roster_id = league_and_roster(league_id, roster_id, user_id)
+    if league_id is None:
+        return {"targets": [], **missing_league_error()}
     return await waiver_target_tools.get_waiver_targets(
         league_id=league_id, roster_id=roster_id, user_id=user_id,
         week=week, season=season, positions=positions, limit=limit,

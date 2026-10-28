@@ -1,14 +1,24 @@
 """Yahoo league + social-news tools. READ-ONLY: no add / drop / claim / trade / lineup code path.
 
-MCP tool wrappers; registered by ``nfl_mcp.tool_registry``.
+MCP tool wrappers; registered by ``nfl_mcp.tool_registry``. ``league_id`` (and your team number
+where one is needed) may be omitted when ``NFL_MCP_DEFAULT_LEAGUE`` / ``NFL_MCP_MY_ROSTER`` are set.
 """
 from __future__ import annotations
 
+import functools
+
 from ..config import validate_string_input
+from ..defaults import (
+    missing_league_error,
+    missing_roster_error,
+    resolve_league,
+    resolve_roster,
+)
 from ..metrics import timing_decorator
 from ..yahoo import is_yahoo_league, news_social
 from ..yahoo.runtime import get_provider
 from ..yahoo.scoring import BFS_SCORING
+from ..yahoo.sources import YahooBlocked, YahooLoginRequired
 from ..yahoo.waiver_model import plan_sequence
 
 
@@ -16,35 +26,74 @@ def _bad(league_id: str):
     return {"success": False, "error": "Use a Yahoo league id like 'yahoo:1234567'"}
 
 
+def _clean_errors(fn):
+    """Return a Yahoo block or an expired sign-in as an error message, not a stack trace."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except (YahooBlocked, YahooLoginRequired) as e:
+            return {"success": False, "error": str(e)}
+    return wrapper
+
+
+def _league(league_id: str | None) -> tuple[str | None, dict | None]:
+    """(validated Yahoo league id, None) or (None, error response). Falls back to the env default."""
+    lid = resolve_league(league_id)
+    if lid is None:
+        return None, missing_league_error()
+    if not is_yahoo_league(lid):
+        return None, _bad(lid)
+    return validate_string_input(lid, "yahoo_league_id", max_length=30, required=True), None
+
+
+def _mid(my_mid: str | int | None) -> tuple[str | None, dict | None]:
+    m = resolve_roster(my_mid)
+    if m is None:
+        return None, missing_roster_error()
+    if not m.isdigit():
+        return None, {"success": False, "error": "Your Yahoo team number must be digits, e.g. '9'"}
+    return m, None
+
+
 @timing_decorator("get_yahoo_waiver_order", tool_type="yahoo")
-async def get_yahoo_waiver_order(league_id: str) -> dict:
+@_clean_errors
+async def get_yahoo_waiver_order(league_id: str | None = None) -> dict:
     """Current waiver order for a Yahoo league (1 = first claim) and how the rolling list works.
 
     BFS uses one continual rolling list: every successful claim (contested or not) sends the
     winner to the bottom; a failed claim costs nothing; free-agent adds and drops do not move
     anyone. The priority shown on Yahoo's Waiver Offers page is the position when that claim
-    was processed.
+    was processed. ``league_id`` defaults to NFL_MCP_DEFAULT_LEAGUE.
     """
-    if not is_yahoo_league(league_id):
-        return _bad(league_id)
-    league_id = validate_string_input(league_id, "yahoo_league_id", max_length=30, required=True)
+    league_id, err = _league(league_id)
+    if err:
+        return err
     order = await (await get_provider(league_id)).get_waiver_order()
     return {"success": True, "order": [{"priority": t["waiver"], "team": t["name"], "mid": t["mid"]} for t in order],
             "rule": "rolling list; win -> bottom; failed claim free; FA adds/drops do not change order"}
 
 
 @timing_decorator("plan_yahoo_waiver_sequence", tool_type="yahoo")
-async def plan_yahoo_waiver_sequence(league_id: str, my_mid: str, wishlist: list[dict],
+@_clean_errors
+async def plan_yahoo_waiver_sequence(league_id: str | None = None, my_mid: str | None = None,
+                                     wishlist: list[dict] | None = None,
                                      contested: list[str] | None = None) -> dict:
     """Rank claims for the rolling list. ``wishlist`` items: ``{player, value, drop}``.
 
     Only the first win uses your current spot; after it you are last, so later claims win only
     if nobody else wants them. Contested claims go first, then the rest by value. Advisory
-    only - this tool never submits anything to Yahoo.
+    only - this tool never submits anything to Yahoo. ``league_id`` / ``my_mid`` default to
+    NFL_MCP_DEFAULT_LEAGUE / NFL_MCP_MY_ROSTER.
     """
-    if not is_yahoo_league(league_id):
-        return _bad(league_id)
-    league_id = validate_string_input(league_id, "yahoo_league_id", max_length=30, required=True)
+    league_id, err = _league(league_id)
+    if err:
+        return err
+    my_mid, err = _mid(my_mid)
+    if err:
+        return err
+    if not wishlist:
+        return {"success": False, "error": "wishlist is required: [{player, value, drop}, ...]"}
     prov = await get_provider(league_id)
     order = [t["mid"] for t in await prov.get_waiver_order()]
     names = {t["mid"]: t["name"] for t in await prov.get_waiver_order()}
@@ -56,33 +105,36 @@ async def plan_yahoo_waiver_sequence(league_id: str, my_mid: str, wishlist: list
 
 
 @timing_decorator("get_yahoo_free_agents", tool_type="yahoo")
-async def get_yahoo_free_agents(league_id: str, position: str = "RB", status: str = "A") -> dict:
+@_clean_errors
+async def get_yahoo_free_agents(league_id: str | None = None, position: str = "RB", status: str = "A") -> dict:
     """Available players with the W/FA tag: ``W`` + date = waiver claim until then, ``FA`` = instant add."""
-    if not is_yahoo_league(league_id):
-        return _bad(league_id)
-    league_id = validate_string_input(league_id, "yahoo_league_id", max_length=30, required=True)
+    league_id, err = _league(league_id)
+    if err:
+        return err
     position = validate_string_input(position, "position", max_length=5, required=True).upper()
     players = await (await get_provider(league_id)).get_free_agents(position, status)
     return {"success": True, "players": players, "count": len(players)}
 
 
 @timing_decorator("get_yahoo_transactions", tool_type="yahoo")
-async def get_yahoo_transactions(league_id: str, kind: str = "all") -> dict:
+@_clean_errors
+async def get_yahoo_transactions(league_id: str | None = None, kind: str = "all") -> dict:
     """Yahoo transaction log. ``kind``: ``all`` or ``waiver`` (contested claims with every team's priority)."""
-    if not is_yahoo_league(league_id):
-        return _bad(league_id)
-    league_id = validate_string_input(league_id, "yahoo_league_id", max_length=30, required=True)
+    league_id, err = _league(league_id)
+    if err:
+        return err
     if kind not in ("all", "waiver", "add", "drop", "trade"):
         return {"success": False, "error": "kind must be all|waiver|add|drop|trade"}
     return {"success": True, **await (await get_provider(league_id)).get_transactions(kind)}
 
 
 @timing_decorator("check_yahoo_scoring", tool_type="yahoo")
-async def check_yahoo_scoring(league_id: str) -> dict:
+@_clean_errors
+async def check_yahoo_scoring(league_id: str | None = None) -> dict:
     """Compare the league's live scoring settings with the verified BFS constants and report any change."""
-    if not is_yahoo_league(league_id):
-        return _bad(league_id)
-    league_id = validate_string_input(league_id, "yahoo_league_id", max_length=30, required=True)
+    league_id, err = _league(league_id)
+    if err:
+        return err
     league = await (await get_provider(league_id)).get_league()
     meta = league["metadata"]
     return {"success": True, "source": meta["scoring_source"],
@@ -90,7 +142,9 @@ async def check_yahoo_scoring(league_id: str) -> dict:
 
 
 @timing_decorator("get_yahoo_projection_comparison", tool_type="yahoo")
-async def get_yahoo_projection_comparison(league_id: str, my_mid: str, week: int | None = None) -> dict:
+@_clean_errors
+async def get_yahoo_projection_comparison(league_id: str | None = None, my_mid: str | None = None,
+                                          week: int | None = None) -> dict:
     """Your Yahoo roster with Yahoo's projection next to nfl_mcp's own, and the gap between them.
 
     Comparison only: Yahoo's numbers are not fed into nfl_mcp's projections or the lineup
@@ -98,49 +152,64 @@ async def get_yahoo_projection_comparison(league_id: str, my_mid: str, week: int
     lineup tool uses (``model_projection`` and ``sleeper_projection`` are its parts); ``gap`` is
     ours minus Yahoo's. Yahoo's figure is the one its roster page shows, i.e. for the current
     week, so ``week`` should be left unset. Large gaps are worth a second look, not an override.
+    ``league_id`` / ``my_mid`` default to NFL_MCP_DEFAULT_LEAGUE / NFL_MCP_MY_ROSTER.
     """
-    if not is_yahoo_league(league_id):
-        return _bad(league_id)
-    league_id = validate_string_input(league_id, "yahoo_league_id", max_length=30, required=True)
-    if not str(my_mid).isdigit():
-        return {"success": False, "error": "my_mid is your Yahoo team number, e.g. '9'"}
-    rows = await (await get_provider(league_id)).get_projection_inputs(str(my_mid))
-    live = [r for r in rows if r["slot"] != "IR" and r.get("team") and r.get("position")]
-    from ..projections import project_players
-    res = await project_players(
-        [{"name": r["name"], "team": r["team"], "position": r["position"], "player_id": r["player_id"]}
-         for r in live], league_id=league_id, week=week)
-    ours = {p.get("player"): p for p in res.get("projections") or []}
-    out, warnings = [], list(res.get("warnings") or [])
-    for r in rows:
-        p = ours.get(r["name"]) if r in live else None
-        wk = res.get("week")
-        # Yahoo's own bye week settles it even when nfl_mcp has no schedule cached for the week.
-        on_bye = bool((p or {}).get("on_bye")) or (r.get("bye_week") is not None and wk is not None
-                                                    and int(r["bye_week"]) == int(wk))
-        mine = None if on_bye else (p.get("projected_points") if p else None)
-        theirs = None if on_bye else r["yahoo_projection"]
-        out.append({
-            "slot": r["slot"], "name": r["name"], "team": r["team"], "position": r["position"],
-            "injury": r["injury"], "on_bye": on_bye, "yahoo_projection": theirs, "our_projection": mine,
-            "model_projection": p.get("model_projection") if p else None,
-            "sleeper_projection": p.get("sleeper_projection") if p else None,
-            "projection_source": p.get("projection_source") if p else None,
-            "gap": round(mine - theirs, 1) if mine is not None and theirs is not None else None,
-        })
-    started = [x for x in out if x["slot"] not in ("BN", "IR")]
-    both = [x for x in started if x["gap"] is not None]
-    if res.get("success") is False:
-        warnings.append(res.get("error") or "nfl_mcp projections unavailable")
+    league_id, err = _league(league_id)
+    if err:
+        return err
+    my_mid, err = _mid(my_mid)
+    if err:
+        return err
+    from ..yahoo.compare import compare_projections
+    rows = await (await get_provider(league_id)).get_projection_inputs(my_mid)
+    cmp = await compare_projections(league_id, rows, week)
     return {
-        "success": True, "week": res.get("week"), "players": out,
-        "starter_totals": {"yahoo": round(sum(x["yahoo_projection"] for x in both), 1),
-                           "ours": round(sum(x["our_projection"] for x in both), 1),
-                           "players_compared": len(both), "starters": len(started)},
-        "biggest_gaps": sorted((x for x in both), key=lambda x: -abs(x["gap"]))[:3],
+        "success": True, "week": cmp["week"], "players": cmp["players"],
+        "starter_totals": cmp["starter_totals"], "biggest_gaps": cmp["biggest_gaps"],
         "note": "Comparison only - the lineup optimizer does not use Yahoo's projections.",
-        "warnings": warnings,
+        "warnings": cmp["warnings"],
     }
+
+
+@timing_decorator("fantasy_checkin", tool_type="yahoo")
+@_clean_errors
+async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
+                          roster_id: str | None = None) -> dict:
+    """ONE-CALL WEEKLY CHECK-IN for a Yahoo league. Read-only: nothing is changed on Yahoo.
+
+    ``league_id`` and ``roster_id`` (your team number) default to NFL_MCP_DEFAULT_LEAGUE and
+    NFL_MCP_MY_ROSTER; with neither given nor set it returns an error saying so. ``week`` defaults
+    to the current NFL week. Returns one structure:
+    - league: scoring source and any difference from the verified BFS constants, the waiver order
+      and your position
+    - roster: every slot with bye week, injury tag, Yahoo projection vs nfl_mcp's and the gap, and
+      the starters' team total (a team gap under 12 points is noise)
+    - problems: starters on bye, empty slots, starters tagged O/D, IR-slot players whose tag is not
+      IR-eligible, a full bench
+    - wire: FA / W (date) tags at each position with a bye hole or a problem, plus the top
+      get_waiver_targets
+    - opponent: projected points, injured starters, starters on bye
+    - byes: the next four weeks, flagging any where you would have fewer than two active RBs
+    - news: reporter posts naming your players, each a single-source lead
+    - warnings: anything single-source or unverified
+    Yahoo's projections are shown for comparison only and never feed nfl_mcp's own.
+    """
+    league_id, err = _league(league_id)
+    if err:
+        return err
+    mid, err = _mid(roster_id)
+    if err:
+        return err
+    from .. import waiver_target_tools
+    from ..week_context import resolve_season_week
+    from ..yahoo.checkin import build_checkin
+    from ..yahoo.compare import compare_projections
+    _, week, _ = await resolve_season_week(None, week)
+    if not week:
+        return {"success": False, "error": "Could not determine the NFL week; pass week."}
+    return await build_checkin(
+        await get_provider(league_id), league_id, mid, int(week), compare=compare_projections,
+        targets=waiver_target_tools.get_waiver_targets, posts=news_social.get_insider_posts)
 
 
 @timing_decorator("verify_news_handles", tool_type="yahoo")

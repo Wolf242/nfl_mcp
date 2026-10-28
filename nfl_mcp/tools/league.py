@@ -15,6 +15,7 @@ from ..config import (
     validate_string_input,
 )
 from ..metrics import timing_decorator
+from ..defaults import league_and_roster, missing_league_error, resolve_league
 from . import _context
 
 # =============================================================================
@@ -22,8 +23,11 @@ from . import _context
 # =============================================================================
 
 @timing_decorator("get_league", tool_type="sleeper")
-async def get_league(league_id: str) -> dict:
+async def get_league(league_id: str | None = None) -> dict:
     """Get league information with input validation."""
+    league_id = resolve_league(league_id)
+    if league_id is None:
+        return {"league": None, **missing_league_error()}
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
         return await sleeper_tools.get_league(league_id)
@@ -32,8 +36,11 @@ async def get_league(league_id: str) -> dict:
 
 
 @timing_decorator("get_rosters", tool_type="sleeper")
-async def get_rosters(league_id: str) -> dict:
+async def get_rosters(league_id: str | None = None) -> dict:
     """Get league rosters with input validation."""
+    league_id = resolve_league(league_id)
+    if league_id is None:
+        return {"rosters": [], "count": 0, **missing_league_error()}
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
         return await sleeper_tools.get_rosters(league_id)
@@ -42,8 +49,11 @@ async def get_rosters(league_id: str) -> dict:
 
 
 @timing_decorator("get_league_users", tool_type="sleeper")
-async def get_league_users(league_id: str) -> dict:
+async def get_league_users(league_id: str | None = None) -> dict:
     """Get league users with input validation."""
+    league_id = resolve_league(league_id)
+    if league_id is None:
+        return {"users": [], "count": 0, **missing_league_error()}
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=20, required=True)
         return await sleeper_tools.get_league_users(league_id)
@@ -178,7 +188,7 @@ async def get_fantasy_context(league_id: str, week: int | None = None, include: 
 
 @timing_decorator("get_bye_week_plan", tool_type="sleeper")
 async def get_bye_week_plan(
-    league_id: str,
+    league_id: str | None = None,
     roster_id: int | None = None,
     user_id: str | None = None,
     weeks_ahead: int = 6,
@@ -222,6 +232,9 @@ async def get_bye_week_plan(
     Example: get_bye_week_plan(league_id="123", user_id="456", weeks_ahead=10)
     """
     from .. import bye_week_tools
+    league_id, roster_id = league_and_roster(league_id, roster_id, user_id)
+    if league_id is None:
+        return {"weeks": [], **missing_league_error()}
     try:
         league_id = validate_string_input(league_id, 'league_id', max_length=50, required=True)
     except ValueError as e:

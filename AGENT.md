@@ -36,15 +36,15 @@ The NFL MCP Server follows a simplified, maintainable architecture:
 
 ## Tool Categories
 
-The server has **88 MCP tools** (including `get_league_leaders`, behind the
+The server has **89 MCP tools** (including `get_league_leaders`, behind the
 `league_leaders` feature flag, enabled by default). Which of them are registered
 depends on the tool profile, `NFL_MCP_TOOL_PROFILE`:
 
 | Profile | Tools | Registered |
 |---|---|---|
-| `season` (default) | 71 | everything except draft (8), coaching (4), admin cache refreshes (`fetch_athletes`, `fetch_all_players`, `fetch_teams`), `get_league_leaders`, `get_cbs_expert_picks` |
+| `season` (default) | 72 | everything except draft (8), coaching (4), admin cache refreshes (`fetch_athletes`, `fetch_all_players`, `fetch_teams`), `get_league_leaders`, `get_cbs_expert_picks` |
 | `offseason` | 48 | draft and coaching; not the in-season-only tools (briefing, retro, projection accuracy, league changes, bye plan, lineups/start-sit, waivers/FAAB/IR, Vegas, weather, streaming, matchups, opponent, playoff odds/bracket, trade finder/market, usage/opportunity), admin or `get_cbs_expert_picks` |
-| `full` | 88 | everything |
+| `full` | 89 | everything |
 
 The profile and count are logged at startup and returned by `GET /health`
 under `tools`. Every tool also ships its own parameter schema over MCP, so an
@@ -57,7 +57,7 @@ now parameters of the one kept (see the CHANGELOG for the old → new mapping).
 <!-- BEGIN GENERATED: tool-index (scripts/gen_agent_docs.py) -->
 <!-- Do not edit by hand: run `python scripts/gen_agent_docs.py`. -->
 
-All 88 tools, grouped by the `nfl_mcp/tools/` module that defines them (season: 71, offseason: 48, full: 88).
+All 89 tools, grouped by the `nfl_mcp/tools/` module that defines them (season: 72, offseason: 48, full: 89).
 
 | Tool | Profiles | Module | Summary |
 |---|---|---|---|
@@ -142,6 +142,7 @@ All 88 tools, grouped by the `nfl_mcp/tools/` module that defines them (season: 
 | `plan_roster_moves` | season, full | `waiver` | CHECK A ROSTER PLAN BEFORE ENTERING IT - and verify it afterwards. |
 | `recommend_faab_bid` | season, full | `waiver` | Recommend a FAAB waiver bid for a player (% of budget + absolute). |
 | `check_yahoo_scoring` | season, full | `yahoo` | Compare the league's live scoring settings with the verified BFS constants and report any change. |
+| `fantasy_checkin` | season, full | `yahoo` | ONE-CALL WEEKLY CHECK-IN for a Yahoo league. Read-only: nothing is changed on Yahoo. |
 | `get_insider_posts` | season, offseason, full | `yahoo` | Latest original posts from NFL reporters on Bluesky. Leads only: single-source, unverified until a second source agrees. |
 | `get_yahoo_free_agents` | season, full | `yahoo` | Available players with the W/FA tag: ``W`` + date = waiver claim until then, ``FA`` = instant add. |
 | `get_yahoo_projection_comparison` | season, full | `yahoo` | Your Yahoo roster with Yahoo's projection next to nfl_mcp's own, and the gap between them. |
@@ -577,6 +578,7 @@ Pass a Yahoo league as `yahoo:<number>` (for example `yahoo:1234567`) to any Sle
 - `get_yahoo_free_agents` (`league_id, position`) - `FA` is an instant add; `W (date)` is a claim until that date.
 - `get_yahoo_transactions` (`league_id, kind`) - `all`, or `waiver` for contested claims with each team's priority.
 - `check_yahoo_scoring` (`league_id`) - live scoring settings vs the verified BFS constants.
+- `fantasy_checkin` (`week, league_id, roster_id`) - the one-call weekly check-in: league scoring and waiver position, every roster slot with bye/injury/Yahoo-vs-ours projection, problems (starters on bye, empty slots, O/D starters, IR-ineligible IR players, full bench), the wire for each problem position, the opponent, the next four byes, and reporter posts naming your players. Read-only; `league_id` / `roster_id` default to `NFL_MCP_DEFAULT_LEAGUE` / `NFL_MCP_MY_ROSTER`.
 - `get_yahoo_projection_comparison` (`league_id, my_mid`) - your roster with Yahoo's projection beside nfl_mcp's own and the gap. Comparison only: the lineup tools never use Yahoo's numbers.
 - `get_insider_posts` (`handles, hours, limit, watch_names`) - Bluesky posts from configured reporters. **Leads only**: single-source and unverified; confirm player, body part, status and date in a second independent source before acting.
 - `verify_news_handles` (`handles`) - resolves handles to profiles so you can confirm who they are.

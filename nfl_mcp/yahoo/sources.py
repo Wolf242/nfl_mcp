@@ -22,6 +22,19 @@ class YahooLoginRequired(RuntimeError):
     """The saved browser profile is not logged in to Yahoo."""
 
 
+class YahooBlocked(RuntimeError):
+    """Yahoo answered 999 / 429 "Request denied": it is rate-limiting this browser.
+
+    Its pages come back as a few bytes that parse as "no teams", so this is raised instead of
+    returning them. Further requests are refused for ``BLOCK_COOLDOWN`` seconds, because hammering
+    a blocked session prolongs the block.
+    """
+
+
+BLOCK_COOLDOWN = 600.0
+BLOCK_STATUSES = (999, 429)
+
+
 def page_url(league: str, page: str, **params) -> str:
     """Canonical read-page URL. ``page`` is one of: home, roster, matchup, players, settings,
     standings, transactions. ``params`` become the query string."""
@@ -74,7 +87,14 @@ class BrowserSource:
         self._browser = None
         self._lock = asyncio.Lock()
         self._last = 0.0
+        self._blocked_until = 0.0
         self._cache: dict[str, tuple[float, str]] = {}
+
+    def _blocked(self) -> YahooBlocked:
+        left = max(0, round(self._blocked_until - time.monotonic()))
+        return YahooBlocked(
+            "Yahoo is rate-limiting this browser (HTTP 999 'Request denied'). Stop loading Yahoo pages and "
+            f"retry in about {max(left, 1) // 60 + 1} minute(s); the block usually clears on its own.")
 
     async def _context(self):
         if self._ctx is None:
@@ -94,6 +114,8 @@ class BrowserSource:
         hit = self._cache.get(url)
         if hit and time.monotonic() - hit[0] < self.ttl:
             return hit[1]
+        if time.monotonic() < self._blocked_until:
+            raise self._blocked()
         async with self._lock:
             wait = self.min_interval - (time.monotonic() - self._last)
             if wait > 0:
@@ -101,7 +123,10 @@ class BrowserSource:
             ctx = await self._context()
             pg = await ctx.new_page()
             try:
-                await pg.goto(url, wait_until="domcontentloaded")
+                resp = await pg.goto(url, wait_until="domcontentloaded")
+                if resp is not None and resp.status in BLOCK_STATUSES:
+                    self._blocked_until = time.monotonic() + BLOCK_COOLDOWN
+                    raise self._blocked()
                 if "login.yahoo.com" in pg.url or "/login" in pg.url:
                     raise YahooLoginRequired(
                         "Yahoo session expired - run `python -m nfl_mcp.yahoo.login` and sign in")
