@@ -1,4 +1,6 @@
 """YahooProvider end to end on synthetic pages, including through nfl_mcp's own Sleeper paths."""
+import time
+
 import pytest
 
 from nfl_mcp import sleeper_tools
@@ -20,13 +22,17 @@ SLEEPER = {
 }
 
 
+def _write(path, text):
+    path.write_text(text, encoding="utf-8")  # DirSource reads UTF-8; the pages contain an en dash
+
+
 @pytest.fixture
 def snap(tmp_path):
-    (tmp_path / "standings.html").write_text(fx.standings_html([
+    _write(tmp_path / "standings.html", fx.standings_html([
         (1, "Team Nine", 9, "6-1-0", "949.28", "706.82", 6, 26),
         (2, "Team Five", 5, "5-2-0", "900.00", "800.00", 4, 9)]))
-    (tmp_path / "settings.html").write_text(fx.settings_html())
-    (tmp_path / "roster_9.html").write_text(fx.roster_html([
+    _write(tmp_path / "settings.html", fx.settings_html())
+    _write(tmp_path / "roster_9.html", fx.roster_html([
         ("QB", "Kirk Cousins", "25812", "LV - QB", "18.42", None),
         ("RB", "Bijan Robinson", "40055", "Atl - RB", "20.16", None),
         ("WR", "Matthew Golden", "41001", "GB - WR", "11.30", "Q"),
@@ -34,19 +40,19 @@ def snap(tmp_path):
         ("BN", "Jaylen Warren", "32800", "Pit - RB", "9.10", None),
         ("IR", "Mystery Rookie", "55555", "Nyj - WR", "0.00", "IR"),
     ]))
-    (tmp_path / "roster_5.html").write_text(fx.roster_html([
+    _write(tmp_path / "roster_5.html", fx.roster_html([
         ("QB", "Kyler Murray", "31833", "Min - QB", "20.22", None),
         ("RB", "Derrick Henry", "28000", "Bal - RB", "15.83", None)]))
     pair = [("QB", ("Kirk Cousins", "25812", "LV - QB", "18.42"), ("Kyler Murray", "31833", "Min - QB", "20.22")),
             ("RB", ("Bijan Robinson", "40055", "Atl - RB", "20.16"), ("Derrick Henry", "28000", "Bal - RB", "15.83"))]
-    (tmp_path / "matchup_9_w8.html").write_text(
+    _write(tmp_path / "matchup_9_w8.html", 
         fx.matchup_html(("9", "Team Nine"), ("5", "Team Five"), pair, ("125.41", "114.70")))
-    (tmp_path / "matchup_5_w8.html").write_text(
+    _write(tmp_path / "matchup_5_w8.html", 
         fx.matchup_html(("5", "Team Five"), ("9", "Team Nine"),
                         [(p, r, l) for p, l, r in pair], ("114.70", "125.41")))
-    (tmp_path / "players_RB_A.html").write_text(fx.players_html([
+    _write(tmp_path / "players_RB_A.html", fx.players_html([
         ("Rico Dowdle", "34001", "Pit - RB", "W (Oct 28)"), ("Jaylen Warren", "32800", "Pit - RB", "FA")]))
-    (tmp_path / "transactions_all.html").write_text(fx.transactions_all_html([
+    _write(tmp_path / "transactions_all.html", fx.transactions_all_html([
         ("Team Nine", 9, "Oct 21,3:57 am", [("Texans", "99001", "Hou - DEF", "Waiver")])]))
     return DirSource(tmp_path)
 
@@ -106,6 +112,8 @@ async def test_waiver_order_free_agent_tags_and_transactions(snap):
 @pytest.mark.asyncio
 async def test_existing_sleeper_paths_accept_a_yahoo_league_id(snap, monkeypatch):
     monkeypatch.setitem(sleeper_tools._PLAYERS_CACHE, "data", SLEEPER)
+    monkeypatch.setitem(sleeper_tools._nfl_state_cache, "state",
+                        (time.monotonic(), {"week": 8, "season": "2026", "season_type": "regular"}))
     runtime.set_source(snap)
     try:
         lg = await sleeper_tools.get_league("yahoo:1234567")

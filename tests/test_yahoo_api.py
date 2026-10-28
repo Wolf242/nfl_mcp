@@ -1,5 +1,6 @@
 """API route: JSON normaliser, parsers on a synthetic payload, token handling, read-only guard."""
 import json
+import sys
 
 import httpx
 import pytest
@@ -58,7 +59,8 @@ async def test_get_sends_bearer_token_and_only_reads(tmp_path):
     assert teams[0]["name"] == "Team Nine"
     data_calls = [r for r in seen if r.url.host == "fantasysports.yahooapis.com"]
     assert all(r.method == "GET" for r in data_calls) and data_calls[0].headers["authorization"] == "Bearer AT"
-    assert (tmp_path / "tok.json").stat().st_mode & 0o777 == 0o600
+    if sys.platform != "win32":  # NTFS has no POSIX file modes
+        assert (tmp_path / "tok.json").stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.asyncio

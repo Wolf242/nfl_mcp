@@ -176,7 +176,7 @@ def _unmentioned(text: str, infos: list[ToolInfo], *, outside_block: bool) -> li
 def run(check: bool) -> int:
     infos, counts = collect()
     problems: list[str] = []
-    agent_old, readme_old = AGENT_MD.read_text(), README_MD.read_text()
+    agent_old, readme_old = AGENT_MD.read_text(encoding="utf-8"), README_MD.read_text(encoding="utf-8")
     agent_new = render_agent(agent_old, infos, counts, problems)
     readme_new = render_readme(readme_old, counts, problems)
 
@@ -193,8 +193,8 @@ def run(check: bool) -> int:
         if stale:
             problems.append(f"stale: {', '.join(stale)} (run `python scripts/gen_agent_docs.py`)")
     else:
-        AGENT_MD.write_text(agent_new)
-        README_MD.write_text(readme_new)
+        AGENT_MD.write_text(agent_new, encoding="utf-8")
+        README_MD.write_text(readme_new, encoding="utf-8")
         for name in stale:
             print(f"updated {name}")
     for p in problems:
