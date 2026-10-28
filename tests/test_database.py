@@ -22,6 +22,7 @@ class TestAthleteDatabase:
 
     def teardown_method(self):
         """Clean up the temporary database after each test."""
+        self.db.close()  # Windows cannot delete a SQLite file that is still open
         Path(self.temp_db.name).unlink(missing_ok=True)
 
     def test_database_initialization(self):

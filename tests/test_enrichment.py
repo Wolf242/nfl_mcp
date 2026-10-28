@@ -8,6 +8,7 @@ Tests cover:
 """
 
 import os
+import os
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -305,8 +306,8 @@ class TestBatchDatabaseQueries:
 
         from nfl_mcp.database import NFLDatabase
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=True) as tmp:
-            db = NFLDatabase(tmp.name)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = NFLDatabase(os.path.join(tmp, "t.db"))
             result = db.get_athletes_by_ids([])
 
         assert result == {}, "Should return empty dict for empty input"
@@ -317,8 +318,8 @@ class TestBatchDatabaseQueries:
 
         from nfl_mcp.database import NFLDatabase
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=True) as tmp:
-            db = NFLDatabase(tmp.name)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = NFLDatabase(os.path.join(tmp, "t.db"))
             result = db.get_athletes_by_ids(["nonexistent1", "nonexistent2"])
 
             assert result == {}, "Should return empty dict when no athletes found"
@@ -329,8 +330,8 @@ class TestBatchDatabaseQueries:
 
         from nfl_mcp.database import NFLDatabase
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=True) as tmp:
-            db = NFLDatabase(tmp.name)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = NFLDatabase(os.path.join(tmp, "t.db"))
 
             # Insert test athletes as a dict (the format upsert_athletes expects)
             test_athletes = {
@@ -359,8 +360,8 @@ class TestSnapshotCleanup:
 
         from nfl_mcp.database import NFLDatabase
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=True) as tmp:
-            db = NFLDatabase(tmp.name)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = NFLDatabase(os.path.join(tmp, "t.db"))
             result = db.cleanup_old_snapshots(max_age_days=7)
 
             assert result["roster_snapshots"] == 0
@@ -374,8 +375,8 @@ class TestSnapshotCleanup:
 
         from nfl_mcp.database import NFLDatabase
 
-        with tempfile.NamedTemporaryFile(suffix=".db", delete=True) as tmp:
-            db = NFLDatabase(tmp.name)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = NFLDatabase(os.path.join(tmp, "t.db"))
 
             # Insert old snapshots (8 days ago)
             old_time = (datetime.now(UTC) - timedelta(days=8)).isoformat()

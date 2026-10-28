@@ -16,7 +16,7 @@ def test_every_referenced_error_type_exists():
     import re
     used = set()
     for path in pathlib.Path("nfl_mcp").glob("*.py"):
-        used |= set(re.findall(r"ErrorType\.([A-Z_]+)", path.read_text()))
+        used |= set(re.findall(r"ErrorType\.([A-Z_]+)", path.read_text(encoding="utf-8")))
     missing = {name for name in used if not hasattr(ErrorType, name)}
     assert not missing
 

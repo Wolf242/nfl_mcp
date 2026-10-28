@@ -5,7 +5,9 @@ Defines the ``live`` marker used to tag tests that hit real external APIs
 offline and deterministically; pass ``--run-live`` to include them. Their
 coverage is otherwise provided by the data-source contracts watchdog.
 """
+import os
 import socket
+import tempfile
 
 import pytest
 
@@ -52,6 +54,20 @@ def _close_leaked_databases(monkeypatch):
         created.append(self)
 
     monkeypatch.setattr(database.DatabaseConnectionPool, "__init__", _tracking_init)
+
+    # A fixture's ``with tempfile.TemporaryDirectory()`` removes the directory before the
+    # teardown below runs. Windows cannot delete a SQLite file that is still open, so close
+    # the pools that live under a directory just before it is removed.
+    cleanup = tempfile.TemporaryDirectory.cleanup
+
+    def _close_then_cleanup(self, *args, **kwargs):
+        root = os.path.normcase(os.path.abspath(self.name))
+        for pool in created:
+            if os.path.normcase(os.path.abspath(str(pool.db_path))).startswith(root + os.sep):
+                pool.close()
+        return cleanup(self, *args, **kwargs)
+
+    monkeypatch.setattr(tempfile.TemporaryDirectory, "cleanup", _close_then_cleanup)
     yield
     for pool in created:
         pool.close()
