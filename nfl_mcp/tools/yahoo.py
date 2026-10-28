@@ -89,6 +89,60 @@ async def check_yahoo_scoring(league_id: str) -> dict:
             "differences_from_bfs": meta["scoring_diff_from_bfs"], "bfs_constants": len(BFS_SCORING)}
 
 
+@timing_decorator("get_yahoo_projection_comparison", tool_type="yahoo")
+async def get_yahoo_projection_comparison(league_id: str, my_mid: str, week: int | None = None) -> dict:
+    """Your Yahoo roster with Yahoo's projection next to nfl_mcp's own, and the gap between them.
+
+    Comparison only: Yahoo's numbers are not fed into nfl_mcp's projections or the lineup
+    optimizer, which keep using their own. ``our_projection`` is the Sleeper-first blend every other
+    lineup tool uses (``model_projection`` and ``sleeper_projection`` are its parts); ``gap`` is
+    ours minus Yahoo's. Yahoo's figure is the one its roster page shows, i.e. for the current
+    week, so ``week`` should be left unset. Large gaps are worth a second look, not an override.
+    """
+    if not is_yahoo_league(league_id):
+        return _bad(league_id)
+    league_id = validate_string_input(league_id, "yahoo_league_id", max_length=30, required=True)
+    if not str(my_mid).isdigit():
+        return {"success": False, "error": "my_mid is your Yahoo team number, e.g. '9'"}
+    rows = await (await get_provider(league_id)).get_projection_inputs(str(my_mid))
+    live = [r for r in rows if r["slot"] != "IR" and r.get("team") and r.get("position")]
+    from ..projections import project_players
+    res = await project_players(
+        [{"name": r["name"], "team": r["team"], "position": r["position"], "player_id": r["player_id"]}
+         for r in live], league_id=league_id, week=week)
+    ours = {p.get("player"): p for p in res.get("projections") or []}
+    out, warnings = [], list(res.get("warnings") or [])
+    for r in rows:
+        p = ours.get(r["name"]) if r in live else None
+        wk = res.get("week")
+        # Yahoo's own bye week settles it even when nfl_mcp has no schedule cached for the week.
+        on_bye = bool((p or {}).get("on_bye")) or (r.get("bye_week") is not None and wk is not None
+                                                    and int(r["bye_week"]) == int(wk))
+        mine = None if on_bye else (p.get("projected_points") if p else None)
+        theirs = None if on_bye else r["yahoo_projection"]
+        out.append({
+            "slot": r["slot"], "name": r["name"], "team": r["team"], "position": r["position"],
+            "injury": r["injury"], "on_bye": on_bye, "yahoo_projection": theirs, "our_projection": mine,
+            "model_projection": p.get("model_projection") if p else None,
+            "sleeper_projection": p.get("sleeper_projection") if p else None,
+            "projection_source": p.get("projection_source") if p else None,
+            "gap": round(mine - theirs, 1) if mine is not None and theirs is not None else None,
+        })
+    started = [x for x in out if x["slot"] not in ("BN", "IR")]
+    both = [x for x in started if x["gap"] is not None]
+    if res.get("success") is False:
+        warnings.append(res.get("error") or "nfl_mcp projections unavailable")
+    return {
+        "success": True, "week": res.get("week"), "players": out,
+        "starter_totals": {"yahoo": round(sum(x["yahoo_projection"] for x in both), 1),
+                           "ours": round(sum(x["our_projection"] for x in both), 1),
+                           "players_compared": len(both), "starters": len(started)},
+        "biggest_gaps": sorted((x for x in both), key=lambda x: -abs(x["gap"]))[:3],
+        "note": "Comparison only - the lineup optimizer does not use Yahoo's projections.",
+        "warnings": warnings,
+    }
+
+
 @timing_decorator("verify_news_handles", tool_type="yahoo")
 async def verify_news_handles(handles: list[str] | None = None) -> dict:
     """Resolve Bluesky handles to profiles (name, bio, followers) so you can confirm they are the reporters you expect."""

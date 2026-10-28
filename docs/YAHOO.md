@@ -2,8 +2,8 @@
 
 Pass a Yahoo league as `yahoo:<number>` (for BFS: `yahoo:1234567`) to any league tool. Rosters, matchups, league settings and
 users are read from Yahoo and returned in Sleeper's shape, so the lineup, waiver, opponent, bye and injury tools run on it
-unchanged. Seven extra tools are Yahoo/news specific (`get_yahoo_waiver_order`, `plan_yahoo_waiver_sequence`,
-`get_yahoo_free_agents`, `get_yahoo_transactions`, `check_yahoo_scoring`, `get_insider_posts`, `verify_news_handles`).
+unchanged. Eight extra tools are Yahoo/news specific (`get_yahoo_waiver_order`, `plan_yahoo_waiver_sequence`,
+`get_yahoo_free_agents`, `get_yahoo_transactions`, `check_yahoo_scoring`, `get_yahoo_projection_comparison`, `get_insider_posts`, `verify_news_handles`).
 
 ## Safety contract
 
@@ -76,8 +76,9 @@ names, add/drop/watch links with a `crumb` token) before turning them into test 
 
 ## Known gaps
 
-* Projections: the lineup tools use nfl_mcp's own projections, not Yahoo's. Yahoo's per-player projection is carried on each
-  roster slot (`yahoo_slots[].projected`) but is not yet fed into the optimizer.
+* Projections: the lineup tools use nfl_mcp's own projections, never Yahoo's. `get_yahoo_projection_comparison` shows Yahoo's
+  per-player projection beside ours (comparison only; a test pins that the optimizer does not read it). Yahoo's figure is the
+  current week's, and is blank for players on bye.
 * Bluesky handles in `DEFAULT_HANDLES` came from one 2025 article and were never resolved live. Run `verify_news_handles`.
   X/Twitter has no free read API, so it is not included.
 * The API route does not implement matchups, free agents or transactions.

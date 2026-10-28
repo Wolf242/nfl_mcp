@@ -101,6 +101,22 @@ class YahooProvider:
                             for s in slots if not s.get("empty")],
         }
 
+    async def get_projection_inputs(self, mid: str) -> list[dict]:
+        """A team's filled slots as projection inputs, each with Yahoo's own projection.
+
+        ``yahoo_projection`` is read-only context for comparison; nothing here feeds it back
+        into nfl_mcp's projections or the lineup optimizer.
+        """
+        out = []
+        for s in await self.data.roster(mid):
+            if s.get("empty"):
+                continue
+            sid, _ = self._sid(s)
+            out.append({"slot": slot_label(s["slot"]), "name": s.get("name"), "team": s.get("team"),
+                        "position": s.get("position"), "player_id": sid, "injury": s.get("injury"),
+                        "yahoo_projection": s.get("projected"), "bye_week": s.get("bye")})
+        return out
+
     async def get_rosters(self) -> list[dict]:
         out = []
         for t in await self.data.standings():
