@@ -94,3 +94,13 @@ def test_team_defenses_on_the_wire_are_listed_with_their_team_code():
     assert len(players) == 21 and all(p["position"] == "DEF" and p["team"] for p in players)
     assert all(p["yahoo_id"] is None for p in players)  # ids are never taken from add links
     assert all(p["availability"]["state"] == "W" for p in players)
+
+
+def test_bye_week_rows_do_not_shift_columns_into_the_projection():
+    slots = {s["name"]: s for s in parsers.parse_roster(_page("roster"))["slots"] if not s.get("empty")}
+    for name in ("George Kittle", "Tyler Shough", "Texans"):
+        s = slots[name]
+        assert s["projected"] is None and s["pct_start"] is None and s["fantasy_points"] is None
+        assert s["pct_rostered"] and s["bye"]
+    played = [s for s in slots.values() if s["bye"] != slots["George Kittle"]["bye"]]
+    assert played and all(0 < s["projected"] < 40 for s in played)

@@ -114,10 +114,14 @@ def parse_roster(html: str) -> dict:
             p = _player_from_cell(pcell)
             p["slot"] = slot
             p["empty"] = False
+            # A player on bye has one "Bye" cell spanning Fan Pts and Proj Pts, which shifts every
+            # later column left by one unless colspan is expanded back to the header's grid.
+            grid = [_text(c) for c in cells
+                    for _ in range(int(c.get("colspan") or 1) if str(c.get("colspan") or "1").isdigit() else 1)]
             by = {}
-            for i, c in enumerate(cells):
+            for i, txt in enumerate(grid):
                 if i < len(flat) and flat[i]:
-                    by.setdefault(flat[i], _text(c))
+                    by.setdefault(flat[i], txt)
             p["bye"] = _float(by.get("Bye", ""))
             p["projected"] = _float(by.get("Proj Pts", ""))
             p["fantasy_points"] = _float(by.get("Fan Pts", ""))
