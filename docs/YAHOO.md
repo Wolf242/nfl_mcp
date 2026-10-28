@@ -22,7 +22,7 @@ unchanged. Seven extra tools are Yahoo/news specific (`get_yahoo_waiver_order`, 
 
 | Route | Setup | Status |
 |---|---|---|
-| **Logged-in browser** (default) | `pip install -e ".[yahoo]" && playwright install chromium`, then `python -m nfl_mcp.yahoo.login` and sign in yourself in the window | parsers written against the live DOM; tested on synthetic pages - run the self-check below |
+| **Logged-in browser** (default) | `pip install -e ".[yahoo]" && playwright install chromium`, then `python -m nfl_mcp.yahoo.login` and sign in yourself in the window | parsers verified against a live league (roster, matchup, standings, players, transactions, settings) and covered by scrubbed real-page fixtures in `tests/fixtures/yahoo`; Yahoo can change its markup, so re-run the self-check below after any surprise |
 | **Saved pages** | set `YAHOO_SNAPSHOT_DIR=/path` with pages saved by `selfcheck --save` (or by hand) | simplest; nothing logs in |
 | **Official API** | register an app at developer.yahoo.com (Fantasy Sports, **read** permission), set `YAHOO_CLIENT_ID`, `YAHOO_CLIENT_SECRET`, `YAHOO_ACCESS=api` | **experimental, unverified** against live Yahoo; implements standings + rosters only; earlier tests of a new app returned `additional_authorization_required` |
 
@@ -35,6 +35,9 @@ refuses it. Either use Yahoo's own email/password or emailed-code sign-in in tha
 $env:YAHOO_CDP_URL = "http://localhost:9222"
 py -m nfl_mcp.yahoo.selfcheck 1234567 9 --save .\yahoo-pages
 ```
+
+If Chrome is already running, close every window first (check the system tray): a new window then joins the existing
+process and silently ignores `--remote-debugging-port`. In PowerShell start Chrome with `Start-Process` or `&`, not a bare quoted path.
 
 Leave that Chrome window open while the server runs; nfl_mcp opens its own tabs in it, reads only the allow-listed pages, and
 never closes your browser. The debug port is reachable only from your computer; close that Chrome when you are done.
@@ -49,9 +52,11 @@ sign-in inside the container's Chromium version.
 python -m nfl_mcp.yahoo.selfcheck 1234567 9 --save ./yahoo-pages
 ```
 
-It prints the scoring source, the waiver order, how many of your players mapped to Sleeper ids, every **UNMAPPED** player, and
-the first running backs on the wire with their `FA` / `W (date)` tag. Anything unmapped or empty means a selector needs a fix:
-send the saved pages (`--save`) and they become real test fixtures.
+It prints the scoring source, the waiver order, how many of your players mapped to Sleeper ids, every **UNMAPPED** player, the
+first running backs on the wire with their `FA` / `W (date)` tag, and both sides of your matchup (`--week N`, default the
+current NFL week) with totals and unmapped players. Anything unmapped or empty means a selector needs a fix. Saved pages
+(`--save`) hold your account details and session tokens: keep them out of git, and scrub them (league id, team and manager
+names, add/drop/watch links with a `crumb` token) before turning them into test fixtures.
 
 ## Environment
 

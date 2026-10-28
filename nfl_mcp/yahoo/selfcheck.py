@@ -21,9 +21,18 @@ async def main(argv: list[str]) -> int:
     if len(argv) < 2:
         print(__doc__)
         return 2
+    src = default_source()
+    try:
+        return await _run(src, argv)
+    finally:
+        # Disconnects an attached Chrome (never closes it) and stops Playwright cleanly.
+        if hasattr(src, "close"):
+            await src.close()
+
+
+async def _run(src, argv: list[str]) -> int:
     league, mid = argv[0], argv[1]
     save = Path(argv[argv.index("--save") + 1]) if "--save" in argv else None
-    src = default_source()
     from .. import sleeper_tools
     await sleeper_tools.fetch_all_players()
     prov = YahooProvider(league, src, sleeper_tools._PLAYERS_CACHE["data"])
