@@ -363,14 +363,18 @@ def test_roster_fit_names_the_slot_the_alternatives_and_what_he_stacks_or_hedges
 
 
 # ------------------------------------------------------------------ the verdict
-def _side(name, proj, *, rz=3.0, floor=8.0, ceil=25.0, flags=(), status=None, yahoo=None, on_bye=False):
-    return {"label": f"{name} (ATL RB)", "projection": {"nfl_mcp": proj, "yahoo": yahoo, "on_bye": on_bye},
-            "usage": {"season": {"red_zone_opportunities_per_game": rz}}, "game_log": {"min": floor, "max": ceil},
+def _side(name, proj, *, rz=3.0, i10=40.0, floor=8.0, ceil=25.0, games=10, flags=(), status=None, yahoo=None,
+          model=None, sleeper=None, on_bye=False):
+    return {"label": f"{name} (ATL RB)",
+            "projection": {"nfl_mcp": proj, "model": model, "sleeper": sleeper, "yahoo": yahoo, "on_bye": on_bye},
+            "usage": {"season": {"red_zone_opportunities_per_game": rz, "inside_10_carry_share": i10}},
+            "game_log": {"games": games, "floor_p20": floor if games >= 8 else None, "ceiling_p80": ceil if games >= 8 else None},
             "injuries": {"player": {"flags": list(flags), "status": status, "statement": "stored report (dated 2026-10-24, stale: x) says Questionable"}}}
 
 
 def test_inside_the_tie_band_the_verdict_is_a_toss_up_with_ordered_tiebreakers_never_a_pick():
-    v = pc.verdict(_side("Rex Runner", 15.4, rz=4.0, floor=9.0, ceil=22.0), _side("Sam Sprint", 14.6, rz=2.0, floor=6.0, ceil=31.0))
+    v = pc.verdict(_side("Rex Runner", 15.4, rz=4.0, i10=60.0, floor=9.0, ceil=22.0),
+                   _side("Sam Sprint", 14.6, rz=2.0, i10=20.0, floor=6.0, ceil=31.0))
     assert v["call"] == "toss-up" and v["pick"] is None and v["gap"] == 0.8
     assert [t["name"] for t in v["tiebreakers"]] == ["projection", "red_zone_share", "floor_ceiling"]
     t = v["tiebreakers"]
@@ -382,7 +386,7 @@ def test_inside_the_tie_band_the_verdict_is_a_toss_up_with_ordered_tiebreakers_n
 
 
 def test_outside_the_band_it_is_an_edge_and_negligible_differences_favour_nobody():
-    v = pc.verdict(_side("Rex Runner", 15.0), _side("Sam Sprint", 18.0, rz=3.3, floor=8.5, ceil=25.0))
+    v = pc.verdict(_side("Rex Runner", 15.0), _side("Sam Sprint", 18.0, rz=3.3, i10=42.0, floor=8.5, ceil=25.0))
     assert v["call"] == "edge" and v["pick"] == "Sam Sprint (ATL RB)" and v["gap"] == -3.0
     t = v["tiebreakers"]
     assert t[1]["favors"] == "even" and t[2]["floor_favors"] == "even" and t[2]["ceiling_favors"] == "even"
@@ -395,7 +399,88 @@ def test_unconfirmed_availability_and_missing_projections_are_called_out():
     none = pc.verdict(_side("A", None, on_bye=True), _side("B", 12.0))
     assert none["call"] == "no call" and none["pick"] is None and "A (ATL RB) is on bye." in none["caveats"]
     yahoo = pc.verdict(_side("A", None, yahoo=14.0), _side("B", None, yahoo=10.0))
-    assert yahoo["projection_basis"] == "Yahoo" and yahoo["pick"] == "A (ATL RB)"
+    assert yahoo["projection_basis"] == "median of the available sources (Yahoo)" and yahoo["pick"] == "A (ATL RB)"
+
+
+# --- 1. the gap is the median of the available sources
+def test_the_gap_is_the_median_of_the_available_sources_and_every_sources_gap_is_shown():
+    a = _side("Rex Runner", 15.0, model=14.0, sleeper=19.0, yahoo=13.0)          # median (13, 14, 15, 19) = 14.5
+    b = _side("Sam Sprint", 14.0, model=13.0, sleeper=13.0, yahoo=12.0)          # median (12, 13, 13, 14) = 13.0
+    v = pc.verdict(a, b)
+    p = v["projection"]
+    assert (p["a_median"], p["b_median"], v["gap"]) == (14.5, 13.0, 1.5) and v["call"] == "edge"
+    assert p["source_gaps"] == {"nfl_mcp": 1.0, "model": 1.0, "sleeper": 6.0, "yahoo": 1.0}
+    assert "nfl_mcp +1.0" in v["tiebreakers"][0]["detail"] and "Sleeper +6.0" in v["tiebreakers"][0]["detail"]
+    # a single outlier source cannot move the median: Sleeper's 19 is ignored, nfl_mcp alone would say 1.0
+    assert pc.verdict(_side("A", 15.0, model=15.0, sleeper=30.0), _side("B", 15.0, model=15.0, sleeper=2.0))["gap"] == 0.0
+    # a source only one player has still counts toward his median, and is not in the gap list
+    lone = pc.verdict(_side("A", 12.0, yahoo=18.0), _side("B", 12.0))["projection"]
+    assert lone["a_median"] == 15.0 and lone["source_gaps"] == {"nfl_mcp": 0.0}
+    # on bye: no source counts
+    assert pc.verdict(_side("A", 12.0, model=12.0, on_bye=True), _side("B", 12.0))["call"] == "no call"
+
+
+def test_sources_that_disagree_on_who_leads_or_on_the_band_are_named():
+    lead = pc.verdict(_side("A", 15.0, sleeper=13.0), _side("B", 14.0, sleeper=14.5))
+    d = lead["projection"]
+    assert d["sources_disagree"] and lead["call"] == "toss-up"
+    assert "sources disagree: they disagree on who leads: nfl_mcp favors A (ATL RB); Sleeper favors B (ATL RB)" in d["disagreement"]
+    assert "Sources disagree" in lead["summary"] and any(c.startswith("Sources disagree") for c in lead["caveats"])
+    band = pc.verdict(_side("A", 15.0, model=14.0, sleeper=14.0), _side("B", 12.0, model=13.9, sleeper=13.9))
+    assert band["projection"]["sources_disagree"]
+    assert "nfl_mcp (+3.0) is outside the 1.5-point tie band while model (+0.1), Sleeper (+0.1) are inside it" in band["projection"]["disagreement"]
+    assert "leads" not in band["projection"]["disagreement"]                       # they all favour A: only the band differs
+    calm = pc.verdict(_side("A", 15.0, model=14.5, sleeper=15.5), _side("B", 12.0, model=12.5, sleeper=11.5))["projection"]
+    assert calm["sources_disagree"] is False and calm["disagreement"] is None
+    assert pc.verdict(_side("A", 15.0), _side("B", 14.0))["projection"]["sources_disagree"] is False  # one source cannot disagree
+
+
+# --- 2. floor and ceiling are the 20th and 80th percentile, and only with enough games
+def test_the_game_log_gives_the_20th_and_80th_percentile_from_eight_games():
+    def entry(pts):
+        return {"position": "RB", "games": [{"week": i + 1, "opponent": "TB", "carries": 0, "receptions": 0, "rec_yards": 0,
+                                             "rush_yards": 0, "fantasy_points_override": p} for i, p in enumerate(pts)]}
+    monkey = pc.bfs_points
+    try:
+        pc.bfs_points = lambda g, pos: g["fantasy_points_override"]
+        eight = pc.game_log(entry([2, 4, 6, 8, 10, 12, 14, 40]), 20)
+        seven = pc.game_log(entry([2, 4, 6, 8, 10, 12, 14]), 20)
+    finally:
+        pc.bfs_points = monkey
+    # linear interpolation: the 20th percentile of 8 values sits at index 1.4 (4.8), the 80th at 5.6 (13.2)
+    assert eight["floor_p20"] == 4.8 and eight["ceiling_p80"] == 13.2
+    assert eight["min"] == 2 and eight["max"] == 40                                 # still reported, but not what the call uses
+    assert seven["floor_p20"] is None and seven["ceiling_p80"] is None and seven["games"] == 7
+
+
+def test_floor_and_ceiling_use_the_percentiles_and_say_not_meaningful_below_eight_games():
+    v = pc.verdict(_side("A", 15.0, floor=9.0, ceil=22.0), _side("B", 15.0, floor=6.0, ceil=31.0))
+    fc = v["tiebreakers"][2]
+    assert fc["floor_favors"] == "A (ATL RB)" and fc["ceiling_favors"] == "B (ATL RB)"
+    assert "20th percentile" in fc["detail"] and "80th percentile" in fc["detail"] and "lowest game" not in fc["detail"]
+    short = pc.verdict(_side("A", 15.0), _side("B", 15.0, games=6))["tiebreakers"][2]
+    assert short["favors"] == short["floor_favors"] == short["ceiling_favors"] == "not meaningful"
+    assert short["detail"].startswith("not meaningful (B (ATL RB) 6 games;")
+    both = pc.verdict(_side("A", 15.0, games=4), _side("B", 15.0, games=7))["tiebreakers"][2]["detail"]
+    assert "A (ATL RB) 4 games" in both and "B (ATL RB) 7 games" in both
+    assert pc.verdict(_side("A", 15.0, games=8), _side("B", 15.0, games=8))["tiebreakers"][2]["floor_favors"] == "even"
+
+
+# --- 3. red zone: both measures, and a split names no winner
+def test_red_zone_reports_both_measures_and_names_no_winner_when_they_split():
+    split = pc.verdict(_side("A", 15.0, rz=4.5, i10=20.0), _side("B", 15.0, rz=3.0, i10=60.0))["tiebreakers"][1]
+    assert split["favors"] == "split" and split["measures_split"] is True
+    assert split["red_zone_opportunities_per_game"] == {"a": 4.5, "b": 3.0, "favors": "A (ATL RB)"}
+    assert split["inside_10_carry_share"] == {"a": 20.0, "b": 60.0, "favors": "B (ATL RB)"}
+    assert "no winner is named" in split["detail"] and "inside-10 carry share: A (ATL RB) 20.0% vs B (ATL RB) 60.0%" in split["detail"]
+    agree = pc.verdict(_side("A", 15.0, rz=4.5, i10=60.0), _side("B", 15.0, rz=3.0, i10=20.0))["tiebreakers"][1]
+    assert agree["favors"] == "A (ATL RB)" and agree["measures_split"] is False
+    one = pc.verdict(_side("A", 15.0, rz=4.5, i10=41.0), _side("B", 15.0, rz=3.0, i10=40.0))["tiebreakers"][1]
+    assert one["favors"] == "A (ATL RB)" and one["inside_10_carry_share"]["favors"] == "even"      # level on one: the other decides
+    level = pc.verdict(_side("A", 15.0, rz=3.2, i10=41.0), _side("B", 15.0, rz=3.0, i10=40.0))["tiebreakers"][1]
+    assert level["favors"] == "even"
+    none = pc.verdict(_side("A", 15.0, rz=None, i10=None), _side("B", 15.0, rz=None, i10=None))["tiebreakers"][1]
+    assert none["favors"] == "even"
 
 
 # ------------------------------------------------------------------ the whole comparison
@@ -464,7 +549,10 @@ async def test_two_same_position_players_compared_end_to_end():
     assert b["injuries"]["opposing_defense"]["team"] == "LAC"
     assert r["lock"]["locks_first"] == "Rex Runner (ATL RB)" and r["lock"]["first_is_thursday"]
     v = r["verdict"]
-    assert v["call"] == "toss-up" and v["pick"] is None and v["gap"] == 0.8
+    assert v["call"] == "toss-up" and v["pick"] is None and v["gap"] == 0.4                     # medians 14.7 vs 14.3
+    assert v["projection"]["source_gaps"] == {"nfl_mcp": 0.8, "model": 0.0, "sleeper": 0.0, "yahoo": 3.0}
+    assert v["projection"]["sources_disagree"] and "Yahoo (+3.0) is outside" in v["projection"]["disagreement"]
+    assert v["tiebreakers"][2]["favors"] == "not meaningful"                                    # four games each
     assert r["warnings"] == ["Last season's weekly stats is not published for 2025."]
 
 

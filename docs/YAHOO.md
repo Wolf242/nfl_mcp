@@ -108,17 +108,27 @@ Per player:
   toughest), the same for yards-only and touchdown-only points, the stat splits (rushing yards and touchdowns, receptions, receiving
   yards and touchdowns; passing for a QB), and EPA per rush allowed. `driver` says whether the rank follows yards (stable) or touchdowns
   (noisy); `small_sample` is set under four games.
-* **Projections**: nfl_mcp's projection priced on BFS beside Yahoo's (Yahoo's own number is in the league's scoring and exists only for
-  players on your roster), and the gap; a gap under 1.5 points is noise.
+* **Projections**: nfl_mcp's projection priced on BFS, the model and Sleeper components, and Yahoo's (its own number is in the league's
+  scoring and exists only for players on your roster), with the gap against Yahoo; a gap under 1.5 points is noise.
 * **Injuries**: both players' records and the opposing defense's injured key starters (at least 60% of the defense's snaps over its last
   three games), each with its report date and the check-in's stale (older than 3 days or before this NFL week), conflicting, Yahoo-only
   and single-source flags. These are stored reports, not refreshed; run the check-in (which refreshes) first for fresh ones.
 * **Roster fit**: the slot he fills, the slots he is eligible for and who holds them, bench alternatives for his slot, and roster players
   in the same game: stacks (his quarterback or receiver, his defense), players who share his touches, and hedges (the opponent's players).
 
-The **verdict** is `toss-up` whenever the projections are within the 1.5-point single-player tie band, with `pick: null`, and then lists
-the tiebreakers in order: projection, red-zone share (carries inside the 20 plus red-zone targets per game), floor and ceiling. Each
-names the player it favours, or `even` when the difference is negligible. A toss-up is never presented as a pick; outside the band the
+The **verdict** uses the **median** of each player's available projection sources (nfl_mcp, model, Sleeper, Yahoo when present), so one
+outlier cannot move it, and shows every source's own gap beside it. If the sources disagree on who leads, or one source's gap is
+outside the 1.5-point tie band while another's is inside, it says "sources disagree" and names them (in `verdict.projection.disagreement`,
+the caveats and the summary). It is `toss-up` whenever the median gap is within the tie band, with `pick: null`, and then lists the
+tiebreakers in order:
+
+1. projection (the median);
+2. red zone, as two measures: red-zone opportunities per game (carries inside the 20 plus red-zone targets) and inside-10 carry share. If
+   they favour different players the result is `split` and no winner is named;
+3. floor and ceiling, as the 20th and 80th percentile of the BFS game log (not the lowest and highest game), and "not meaningful (n games)"
+   for any player with fewer than 8 games.
+
+Each names the player it favours, or `even` when the difference is negligible. A toss-up is never presented as a pick; outside the band the
 verdict is an `edge` with the same tiebreakers beside it. Unconfirmed availability (stale, conflicting or single-source injury data) is
 listed as a caveat.
 

@@ -296,9 +296,14 @@ async def compare_players(player_a: str, player_b: str, week: int | None = None,
     single-source flags; roster fit (slot, eligible alternatives, stacks and hedges in the same game)
     when ``league_id`` (default NFL_MCP_DEFAULT_LEAGUE) is a Yahoo league and NFL_MCP_MY_ROSTER is set.
 
-    The verdict says "toss-up" whenever the projections are within the 1.5-point single-player tie band,
-    and then lists the tiebreakers in order (projection, red-zone share, floor and ceiling) with the
-    player each favours; a toss-up is never presented as a pick. Stats, snaps, play by play and the
+    The verdict's gap is the median of each player's available projection sources (nfl_mcp, model,
+    Sleeper, Yahoo when present), with every source's own gap shown; when the sources disagree on who
+    leads, or one gap is outside the tie band and another inside, it says "sources disagree" and names
+    them. It says "toss-up" whenever that gap is within the 1.5-point single-player tie band, and then
+    lists the tiebreakers in order: projection; red zone (opportunities per game and inside-10 carry
+    share, "split" with no winner when they favour different players); floor and ceiling as the 20th and
+    80th percentile of the game log ("not meaningful" under 8 games). A toss-up is never presented as a
+    pick. Stats, snaps, play by play and the
     schedule come from nflverse (key-free, cached per season); nothing is written anywhere.
     """
     from datetime import UTC, datetime

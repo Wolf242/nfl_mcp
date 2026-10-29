@@ -40,6 +40,9 @@ SMALL_SAMPLE_GAMES = 4      # a defense with fewer games than this is a small sa
 KEY_DEFENDER_SNAP_SHARE = 0.60
 # Differences too small to favour either player in a tiebreaker.
 PROJECTION_EPS, RED_ZONE_EPS, FLOOR_CEILING_EPS = 0.05, 0.5, 1.0
+INSIDE_10_EPS = 5.0          # points of inside-10 carry share below which two players are level
+MIN_GAMES_PERCENTILE = 8     # fewer games than this and a 20th/80th percentile says nothing
+SOURCE_NAMES = {"nfl_mcp": "nfl_mcp", "model": "model", "sleeper": "Sleeper", "yahoo": "Yahoo"}
 _SPLITS = {
     "QB": ("passing_yards", "passing_tds", "rushing_yards", "rushing_tds"),
     "RB": ("rushing_yards", "rushing_tds", "receptions", "receiving_yards", "receiving_tds"),
@@ -146,6 +149,11 @@ def game_log(entry: dict, week: int) -> dict:
         out.update(mean=_r1(statistics.mean(pts)), median=_r1(statistics.median(pts)), min=min(pts), max=max(pts))
     else:
         out.update(mean=None, median=None, min=None, max=None)
+    if len(pts) >= MIN_GAMES_PERCENTILE:
+        q = statistics.quantiles(pts, n=5, method="inclusive")  # cut points at the 20th, 40th, 60th and 80th percentile
+        out.update(floor_p20=_r1(q[0]), ceiling_p80=_r1(q[3]))
+    else:
+        out.update(floor_p20=None, ceiling_p80=None)
     out["note"] = ("Points are for the weeks he has a stat line; a week with none is a bye, a game he missed or one in "
                    "which he recorded nothing.")
     return out
@@ -531,13 +539,83 @@ def _favor(a: float | None, b: float | None, name_a: str, name_b: str, eps: floa
     return name_a if a > b else name_b
 
 
+def _source_values(p: dict) -> dict[str, float]:
+    """Every projection source that has a number for this player (none when he is on bye)."""
+    proj = p["projection"]
+    if proj.get("on_bye"):
+        return {}
+    return {k: proj[k] for k in SOURCE_NAMES if proj.get(k) is not None}
+
+
+def projection_view(a: dict, b: dict) -> dict:
+    """The median of each player's available projection sources, every source's own gap, and whether the
+    sources disagree (on who leads, or on whether the gap is outside the tie band)."""
+    la, lb = a["label"], b["label"]
+    va, vb = _source_values(a), _source_values(b)
+    med_a = round(statistics.median(va.values()), 1) if va else None
+    med_b = round(statistics.median(vb.values()), 1) if vb else None
+    gaps = {k: round(va[k] - vb[k], 1) for k in SOURCE_NAMES if k in va and k in vb}
+    view: dict[str, Any] = {
+        "basis": "median of the available sources (" + ", ".join(SOURCE_NAMES[k] for k in SOURCE_NAMES if k in va or k in vb) + ")",
+        "a_sources": va, "b_sources": vb, "a_median": med_a, "b_median": med_b,
+        "gap": round(med_a - med_b, 1) if med_a is not None and med_b is not None else None,
+        "source_gaps": gaps, "sources_disagree": False, "disagreement": None}
+    reasons = []
+    leaders = {k: (la if g > 0 else lb) for k, g in gaps.items() if abs(g) > PROJECTION_EPS}
+    if len(set(leaders.values())) > 1:
+        reasons.append("they disagree on who leads: " + "; ".join(
+            f"{', '.join(SOURCE_NAMES[k] for k in leaders if leaders[k] == who)} favor{'s' if sum(1 for k in leaders if leaders[k] == who) == 1 else ''} {who}"
+            for who in dict.fromkeys(leaders.values())))
+    outside = [k for k, g in gaps.items() if abs(g) >= TIE_BAND]
+    inside = [k for k, g in gaps.items() if abs(g) < TIE_BAND]
+    if outside and inside:
+        reasons.append(f"{', '.join(f'{SOURCE_NAMES[k]} ({gaps[k]:+.1f})' for k in outside)} "
+                       f"{'is' if len(outside) == 1 else 'are'} outside the {TIE_BAND:g}-point tie band while "
+                       f"{', '.join(f'{SOURCE_NAMES[k]} ({gaps[k]:+.1f})' for k in inside)} "
+                       f"{'is' if len(inside) == 1 else 'are'} inside it")
+    if reasons:
+        view["sources_disagree"] = True
+        view["disagreement"] = "sources disagree: " + "; and ".join(reasons) + "."
+    return view
+
+
+def _red_zone(a: dict, b: dict) -> dict:
+    """Red-zone opportunities per game and inside-10 carry share, each with the player it favours; when the
+    two measures favour different players the answer is ``split`` and no winner is named."""
+    la, lb = a["label"], b["label"]
+    sa, sb = a["usage"]["season"], b["usage"]["season"]
+    rz = (sa["red_zone_opportunities_per_game"], sb["red_zone_opportunities_per_game"])
+    i10 = (sa["inside_10_carry_share"], sb["inside_10_carry_share"])
+    f_rz, f_i10 = _favor(*rz, la, lb, RED_ZONE_EPS), _favor(*i10, la, lb, INSIDE_10_EPS)
+    split = "even" not in (f_rz, f_i10) and f_rz != f_i10
+    favors = "split" if split else (f_rz if f_rz != "even" else f_i10)
+    detail = (f"red-zone opportunities (carries inside the 20 + red-zone targets) per game: {la} {rz[0]} vs {lb} {rz[1]}; "
+              f"inside-10 carry share: {la} {i10[0]}% vs {lb} {i10[1]}%")
+    if split:
+        detail += f". The measures split ({f_rz} on opportunities per game, {f_i10} on inside-10 share): no winner is named."
+    return {"favors": favors, "measures_split": split,
+            "red_zone_opportunities_per_game": {"a": rz[0], "b": rz[1], "favors": f_rz},
+            "inside_10_carry_share": {"a": i10[0], "b": i10[1], "favors": f_i10}, "detail": detail}
+
+
+def _floor_ceiling(a: dict, b: dict) -> dict:
+    """20th and 80th percentile of each player's game log; not meaningful under :data:`MIN_GAMES_PERCENTILE` games."""
+    la, lb = a["label"], b["label"]
+    ga, gb = a["game_log"], b["game_log"]
+    short = [f"{p['label']} {p['game_log']['games']} games" for p in (a, b) if p["game_log"]["floor_p20"] is None]
+    if short:
+        return {"floor_favors": "not meaningful", "ceiling_favors": "not meaningful", "favors": "not meaningful",
+                "detail": f"not meaningful ({'; '.join(short)}; a percentile needs at least {MIN_GAMES_PERCENTILE})"}
+    fa, fb, ca_, cb_ = ga["floor_p20"], gb["floor_p20"], ga["ceiling_p80"], gb["ceiling_p80"]
+    return {"floor_favors": _favor(fa, fb, la, lb, FLOOR_CEILING_EPS), "ceiling_favors": _favor(ca_, cb_, la, lb, FLOOR_CEILING_EPS),
+            "favors": _favor(fa, fb, la, lb, FLOOR_CEILING_EPS),
+            "detail": f"floor (20th percentile) {la} {fa} vs {lb} {fb}; ceiling (80th percentile) {la} {ca_} vs {lb} {cb_}"}
+
+
 def verdict(a: dict, b: dict) -> dict:
     """Pick only outside the tie band; otherwise a toss-up with the tiebreakers in order."""
     la, lb = a["label"], b["label"]
-    pa, pb = a["projection"]["nfl_mcp"], b["projection"]["nfl_mcp"]
-    basis = "nfl_mcp"
-    if pa is None or pb is None:
-        pa, pb, basis = a["projection"]["yahoo"], b["projection"]["yahoo"], "Yahoo"
+    view = projection_view(a, b)
     caveats = []
     for p in (a, b):
         flagged = [i for i in p["injuries"]["player"]["flags"]
@@ -548,32 +626,30 @@ def verdict(a: dict, b: dict) -> dict:
                            f"{p['injuries']['player']['statement']}.")
         elif p["projection"].get("on_bye"):
             caveats.append(f"{p['label']} is on bye.")
-    out: dict[str, Any] = {"projection_basis": basis, "tie_band": TIE_BAND, "caveats": caveats}
-    if pa is None or pb is None:
+    if view["disagreement"]:
+        caveats.append(view["disagreement"][0].upper() + view["disagreement"][1:])
+    out: dict[str, Any] = {"projection_basis": view["basis"], "projection": view, "tie_band": TIE_BAND, "caveats": caveats}
+    if view["gap"] is None:
         return {**out, "call": "no call", "pick": None, "gap": None,
                 "summary": "At least one player has no projection (bye, or none available), so no call is made."}
-    gap = round(pa - pb, 1)
+    gap, ma, mb = view["gap"], view["a_median"], view["b_median"]
     out["gap"] = gap
-    rz_a, rz_b = a["usage"]["season"]["red_zone_opportunities_per_game"], b["usage"]["season"]["red_zone_opportunities_per_game"]
-    fa, fb, ca_, cb_ = a["game_log"]["min"], b["game_log"]["min"], a["game_log"]["max"], b["game_log"]["max"]
     tiebreakers = [
-        {"order": 1, "name": "projection", "favors": _favor(pa, pb, la, lb, PROJECTION_EPS),
-         "detail": f"{la} {pa:.1f} vs {lb} {pb:.1f} ({basis}, BFS)"},
-        {"order": 2, "name": "red_zone_share", "favors": _favor(rz_a, rz_b, la, lb, RED_ZONE_EPS),
-         "detail": f"red-zone opportunities (carries inside the 20 + red-zone targets) per game: {la} {rz_a} vs {lb} {rz_b}"},
-        {"order": 3, "name": "floor_ceiling", "floor_favors": _favor(fa, fb, la, lb, FLOOR_CEILING_EPS),
-         "ceiling_favors": _favor(ca_, cb_, la, lb, FLOOR_CEILING_EPS),
-         "favors": _favor(fa, fb, la, lb, FLOOR_CEILING_EPS),
-         "detail": f"floor (lowest game) {la} {fa} vs {lb} {fb}; ceiling (highest game) {la} {ca_} vs {lb} {cb_}"}]
+        {"order": 1, "name": "projection", "favors": _favor(ma, mb, la, lb, PROJECTION_EPS),
+         "detail": f"{la} {ma:.1f} vs {lb} {mb:.1f} ({view['basis']}, BFS); source gaps: "
+                   + (", ".join(f"{SOURCE_NAMES[k]} {g:+.1f}" for k, g in view["source_gaps"].items()) or "none in common")},
+        {"order": 2, "name": "red_zone_share", **_red_zone(a, b)},
+        {"order": 3, "name": "floor_ceiling", **_floor_ceiling(a, b)}]
+    disagree = (" " + view["disagreement"][0].upper() + view["disagreement"][1:]) if view["disagreement"] else ""
     if abs(gap) < TIE_BAND:
         return {**out, "call": "toss-up", "pick": None, "tiebreakers": tiebreakers,
-                "summary": (f"Toss-up: the projections are {abs(gap):.1f} apart, inside the {TIE_BAND:g}-point tie band, so "
+                "summary": (f"Toss-up: the median projections are {abs(gap):.1f} apart, inside the {TIE_BAND:g}-point tie band, so "
                             "they cannot separate the two. The tiebreakers below are for your risk preference; none of them "
-                            "is a pick.")}
+                            "is a pick." + disagree)}
     pick = la if gap > 0 else lb
     return {**out, "call": "edge", "pick": pick, "tiebreakers": tiebreakers,
-            "summary": (f"{pick} has the edge on projection by {abs(gap):.1f}, outside the {TIE_BAND:g}-point tie band; "
-                        "the tiebreakers show whether usage and variance agree.")}
+            "summary": (f"{pick} has the edge on the median projection by {abs(gap):.1f}, outside the {TIE_BAND:g}-point tie band; "
+                        "the tiebreakers show whether usage and variance agree." + disagree)}
 
 
 # ------------------------------------------------------------------ assembling it

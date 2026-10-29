@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`compare_players` verdict.** The gap is the median of each player's available projection
+  sources (nfl_mcp, model, Sleeper, Yahoo), every source's gap is shown, and "sources disagree"
+  names the sources when they split on who leads or straddle the tie band. Floor and ceiling are
+  the 20th and 80th percentile of the game log, "not meaningful (n games)" under 8 games. The
+  red-zone tiebreaker reports opportunities per game and inside-10 carry share, and names no
+  winner (`split`) when they favour different players.
+
 ### Added
 
 - **`compare_players`** (new tool, season/full profiles; 73 / 90 tools): two QB/RB/WR/TE side by
