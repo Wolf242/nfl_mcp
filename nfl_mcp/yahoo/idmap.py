@@ -62,3 +62,25 @@ class IdMap:
             if len(hits) == 1:
                 return hits[0], "name"
         return None, "unmapped"
+
+
+def player_label(name: str | None, team: str | None, position: str | None) -> str:
+    """``"Full Name (TEAM POS)"``: the one way a player is named in a report.
+
+    A surname alone is ambiguous (two Warrens, two Robinsons on one page), so no report line
+    prints one without the team and position that tell them apart.
+    """
+    who = (name or "").strip() or "Unknown player"
+    where = " ".join(x for x in ((norm_team(team) or "").strip(), (position or "").upper().strip()) if x)
+    return f"{who} ({where})" if where else who
+
+
+def player_key(p: Mapping) -> str:
+    """Internal identity of a player row: the Sleeper id when mapped, else name+team+position.
+
+    Never the surname or the display name alone: two players can share either.
+    """
+    pid = p.get("player_id")
+    if pid not in (None, "", "0"):
+        return f"id:{pid}"
+    return "np:" + "|".join((norm_name(p.get("name")), norm_team(p.get("team")) or "", (p.get("position") or "").upper()))

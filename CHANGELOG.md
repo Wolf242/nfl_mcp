@@ -89,6 +89,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`fantasy_checkin` (Yahoo)**: five defects from a real run. (1) Every player is printed as
+  "Full Name (TEAM POS)" and matched on the player id, so two Warrens or two Robinsons no longer
+  collide. (2) Drop candidates are ranked by a job test (insurance for a starter's bye or injury in
+  the next four weeks, or a path to a bigger role) instead of this week's projection; a bye-week
+  player who covers a later bye is not "free to cut"; each flagged starter's bench replacements are
+  compared with the wire first (`wire.vs_bench`, 1.5-point tie). (3) Stale, conflicting or
+  Yahoo-only injury data is flagged and an unverified Out's projection of 0 is "unknown", not a
+  drop; `agree` now needs designation, practice and body part to match (otherwise `partial`);
+  posts relayed by one aggregator account count as one origin. (4) `wire.targets` are joined to
+  Yahoo's free agents by player id and carry Yahoo's FA / W tag; unmappable targets are dropped
+  with a warning and an empty list is explained. (5) The thin-position flag compares active players
+  to the slots to fill (RB: 2 + flex = 3) and each week names the starters out; "good matchup"
+  appears only outside the noise band.
+
 - **`get_player_ownership`**: once a team's game this week has started, an unrostered
   player also gets `in_time_for_next_kickoff` / `next_kickoff_local` — a claim
   processing on waiver day still helps next week (`in_time_for_kickoff` was False

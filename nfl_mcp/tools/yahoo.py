@@ -187,15 +187,28 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
     - problems: starters on bye, empty slots, starters tagged O/D, IR-slot players whose tag is not
       IR-eligible, a full bench
     - wire: FA / W (date) tags at each position with a bye hole or a problem, each candidate
-      projected and ranked with its upgrade over what it replaces, when claims clear, plus the top
-      get_waiver_targets (each with Yahoo's own tag)
-    - drop_candidates: the bench, least useful this week first
-    - opponent: projected points, injured starters, starters on bye
-    - byes: the next four weeks, flagging any with fewer than two active RBs or two or more starters out
+      projected and ranked with its upgrade over what it replaces, when claims clear, vs_bench
+      (each flagged starter's bench replacements compared with the best wire pickup first: inside
+      a 1.5-point tie the answer is "no add needed, use <bench player>"), and the top
+      get_waiver_targets kept only if Yahoo lists them as available, each with Yahoo's own tag
+      (a target that cannot be mapped to a Yahoo player is dropped and named in warnings;
+      targets_note says why the list is empty)
+    - drop_candidates: the bench ranked by a job test: insurance for a starter's bye or injury in
+      the next four weeks, or a path to a bigger role; the drop is whoever does neither.
+      drop_unknown lists bench players whose projection of 0 comes from an unverified Out
+      designation (stale, conflicting or Yahoo-only): they are not ranked
+    - opponent: projected points, margin and its reading (a "good matchup" only outside the
+      noise band), injured starters, starters on bye
+    - byes: the next four weeks: which starters are out (full names), the eligible active players
+      left at each position against the slots to fill (RB: two slots plus the flex = 3), and flags
     - verification: each injury tag and bye week checked against nfl_mcp's injury data and the NFL
-      schedule: agree, conflict, yahoo_only or unverified
-    - news: reporter posts naming your players, each a single-source lead
+      schedule: injuries agree (designation, practice and body part all match), partial (the
+      differing or missing fields are named), conflict, yahoo_only or other_only; byes agree,
+      conflict or unverified. Players carry stale_injury / injury_conflict / yahoo_only flags
+    - news: reporter posts naming your players, each a lead; posts relayed by one aggregator
+      account count as one independent origin
     - warnings: anything single-source or unverified
+    Every player is printed as "Full Name (TEAM POS)" and keyed internally on the player id.
     Yahoo's projections are shown for comparison only and never feed nfl_mcp's own.
     """
     league_id, err = _league(league_id)

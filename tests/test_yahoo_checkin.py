@@ -1,7 +1,7 @@
 """fantasy_checkin, the env defaults and the Yahoo block handling. Offline: fixtures and fakes only."""
 import shutil
 import time
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -76,15 +76,15 @@ def test_bye_outlook_counts_active_rbs_and_flags_a_hole():
     out = {w["week"]: w for w in checkin.bye_outlook(slots, 8, 4)}
     assert [w for w in out] == [8, 9, 10, 11]
     assert out[8]["active_rbs"] == 2 and out[8]["flag"] is None          # R3 is out, IR is ignored
-    assert out[10]["active_rbs"] == 1 and "fewer than 2" in out[10]["flag"]
-    assert out[9]["on_bye"] == [{"name": "W1", "position": "WR", "slot": "WR"}]
+    assert out[10]["active_rbs"] == 1 and "thin at RB: 1 active for 2 slots to fill" in out[10]["flag"]
+    assert out[9]["on_bye"] == [{"name": "W1", "label": "W1 (WR)", "position": "WR", "slot": "WR"}]
     assert out[11]["starters_on_bye"] == 1
 
 
 def test_wire_positions_follow_problems_and_rb_holes():
     probs = checkin.find_problems([S("QB", "A", "QB", bye=WEEK), S("W/R/T", empty=True)], WEEK)
     assert checkin.wire_positions(probs, []) == ["QB", "RB", "WR", "TE"]
-    hole = {"flags": ["fewer than 2 active RBs"], "starters_on_bye": 0, "starters_on_bye_positions": []}
+    hole = {"flags": ["thin at RB"], "short_positions": ["RB"], "starters_on_bye": 0, "starters_on_bye_positions": []}
     assert checkin.wire_positions([], [hole]) == ["RB"]
     assert checkin.wire_positions([], [{"flags": [], "starters_on_bye": 1, "starters_on_bye_positions": ["WR"]}]) == []
     many = {"flags": ["2 starters on bye"], "starters_on_bye": 2, "starters_on_bye_positions": ["WR", "TE"]}
@@ -187,12 +187,13 @@ async def test_checkin_returns_every_section_and_says_nothing_changed(pages):
 async def test_checkin_flags_the_defense_on_bye_and_reads_the_defense_wire(pages):
     r = await build()
     assert ("starter_on_bye", "Texans") in kinds(r["problems"])
+    assert next(p for p in r["problems"] if p["player"] == "Texans")["label"] == "Texans (HOU DEF)"
     assert "bench_full" in [p["type"] for p in r["problems"]]
     # DEF for the Texans' bye now; RB and WR for week 11, when three starters are out
     assert list(r["wire"]["positions"]) == ["DEF", "RB", "WR"]
     tags = {p["tag"] for p in r["wire"]["positions"]["DEF"]}
     assert tags and all(t.startswith("W (") for t in tags)
-    assert any(w.startswith("Week 11: 3 starters on bye") for w in r["warnings"])
+    assert any(w.startswith("Week 11:") and "3 starters on bye" in w for w in r["warnings"])
     t = r["wire"]["targets"][0]
     assert t["name"] == "Wire Guy" and t["yahoo_tag"].startswith("W (")
     # nfl_mcp says add now; Yahoo's tag is a waiver claim, so the check-in says Yahoo's tag wins
@@ -210,6 +211,7 @@ async def test_checkin_opponent_news_and_single_source_warnings(pages):
     assert r["news"]["items"][0]["single_source"] and r["news"]["items"][0]["status"] == "lead"
     text = " ".join(r["warnings"])
     assert "single-source" in text and "rests on Yahoo alone" in text
+    assert r["news"]["independent_origins"] == 1 and r["news"]["origins"] == ["rep"]
 
 
 @pytest.mark.asyncio
@@ -404,7 +406,7 @@ async def test_wire_candidates_are_projected_ranked_and_given_an_upgrade_over_th
     de = r["wire"]["positions"]["DEF"]
     proj = [p["our_projection"] for p in de]
     assert proj == sorted(proj, reverse=True) and proj[0] == 9.0 and len(de) == 6
-    assert de[0]["upgrade"] == 9.0 and "Texans is on bye" in de[0]["upgrade_over"]  # replaces a 0 this week
+    assert de[0]["upgrade"] == 9.0 and "Texans (HOU DEF) is on bye" in de[0]["upgrade_over"]  # replaces a 0 this week
 
 
 def _starter(slot, pos, mine, **k):
@@ -432,6 +434,7 @@ def test_drop_candidates_rank_the_bench_cheapest_first_and_keep_bye_players_last
                                    {**_bench("Ir", "WR", 3.0), "slot": "IR"}])
     assert [d["name"] for d in got] == ["Low", "Mid", "High", "Away"]
     assert got[0]["players_at_position"] == 2 and got[-1]["note"].startswith("on bye this week")
+    assert got[0]["does_a_job"] is False and "does neither job" in got[0]["note"]
 
 
 @pytest.mark.parametrize("today,phrase", [(date(2026, 10, 28), "clear today"), (date(2026, 10, 27), "clear tomorrow"),
@@ -455,8 +458,9 @@ def test_a_week_with_two_starters_on_bye_is_flagged_even_with_enough_backs():
     slots = [S("RB", "R1", "RB", bye=9), S("WR", "W1", "WR", bye=9), S("BN", "R2", "RB"), S("BN", "R3", "RB"),
              S("TE", "T1", "TE", bye=10)]
     out = {w["week"]: w for w in checkin.bye_outlook(slots, 8, 4)}
-    assert out[9]["active_rbs"] == 2 and out[9]["flags"] == ["2 starters on bye (R1 at RB, W1 at WR)"]
-    assert out[10]["flags"] == [] and out[10]["starters_on_bye"] == 1
+    assert out[9]["active_rbs"] == 2
+    assert "2 starters on bye (R1 (RB) at RB, W1 (WR) at WR)" in out[9]["flags"]
+    assert not any("starters on bye" in f for f in out[10]["flags"]) and out[10]["starters_on_bye"] == 1
 
 
 # ------------------------------------------------------------------ verification
@@ -468,7 +472,11 @@ def P(name, slot="WR", team="KC", injury=None, nfl=None, bye=12, **kw):
 
 def test_injury_tags_are_checked_against_nfl_mcp_s_data():
     v = checkin.verify_roster([
-        P("Agree", injury="Q", nfl="Questionable", practice_status="Limited"),
+        P("Agree", injury="Q", nfl="Questionable", practice_status="Limited", yahoo_practice="Limited",
+          nfl_injury_body_part="Hamstring", yahoo_body_part="hamstring"),
+        P("Partial", injury="Q", nfl="Questionable", practice_status="Limited"),
+        P("Differs", injury="Q", nfl="Questionable", practice_status="DNP", yahoo_practice="Limited",
+          nfl_injury_body_part="Knee", yahoo_body_part="Knee"),
         P("Conflict", injury="Q", nfl="Out"),
         P("YahooOnly", injury="Q"),
         P("OtherOnly", nfl="Doubtful"),
@@ -477,13 +485,13 @@ def test_injury_tags_are_checked_against_nfl_mcp_s_data():
         P("IrNoTag", slot="IR"),
     ], 8, {})
     got = {r["name"]: r["verdict"] for r in v["injuries"]}
-    assert got == {"Agree": "agree", "Conflict": "conflict", "YahooOnly": "yahoo_only",
-                   "OtherOnly": "other_only", "Reserve": "agree"}
+    assert got == {"Agree": "agree", "Partial": "partial", "Differs": "partial", "Conflict": "conflict",
+                   "YahooOnly": "yahoo_only", "OtherOnly": "other_only", "Reserve": "partial"}
     assert "practice: Limited" in next(r for r in v["injuries"] if r["name"] == "Agree")["detail"]
-    assert v["summary"]["injuries"] == {"agree": 2, "conflict": 1, "yahoo_only": 1, "other_only": 1}
+    assert v["summary"]["injuries"] == {"agree": 1, "partial": 3, "conflict": 1, "yahoo_only": 1, "other_only": 1}
     text = " ".join(checkin.verification_warnings(v))
-    assert "Injury tag conflict for Conflict" in text and "OtherOnly: nfl_mcp has an injury report" in text
-    assert "only Yahoo reports" in text and "YahooOnly" in text and "2 injury tag(s) agree" in text
+    assert "Injury tag conflict for Conflict" in text and "OtherOnly (KC WR): nfl_mcp has an injury report" in text
+    assert "only Yahoo reports" in text and "YahooOnly" in text and "1 injury tag(s) agree" in text
 
 
 def test_nfl_injury_wording_maps_to_yahoo_tags():
@@ -514,6 +522,7 @@ async def test_checkin_verifies_byes_against_the_schedule_and_reports_what_is_un
     v = r["verification"]
     by = {(b["name"], b["week"]): b["verdict"] for b in v["byes"]}
     assert by[("Texans", 8)] == "agree" and by[("George Kittle", 8)] == "agree"
+    assert all(b["label"] for b in v["byes"])
     assert by[("Bijan Robinson", 11)] == "agree"
     assert {i["name"]: i["verdict"] for i in v["injuries"]}["Matthew Golden"] == "yahoo_only"
     assert any("only Yahoo reports" in w and "Matthew Golden" in w for w in r["warnings"])
@@ -568,15 +577,16 @@ async def test_a_slow_or_failing_injury_refresh_is_a_warning_not_a_failure(pages
 async def test_each_wire_position_says_why_it_is_listed(pages):
     r = await build()
     why = r["wire"]["reasons"]
-    assert any("Texans starts at DEF but is on bye" in x for x in why["DEF"])
+    assert any("Texans (HOU DEF) starts at DEF but is on bye" in x for x in why["DEF"])
     assert any("week 11" in x and "depth for a later week" in x for x in why["RB"])
     assert set(why) == set(r["wire"]["positions"])
 
 
 def test_wire_reasons_cover_problems_empty_slots_and_future_holes():
     probs = checkin.find_problems([S("QB", "A", "QB", injury="O"), S("W/R/T", empty=True)], 8)
-    hole = {"week": 10, "flags": ["fewer than 2 active RBs"], "starters_on_bye": 0, "starters_on_bye_positions": []}
-    why = checkin.wire_reasons(probs, [hole])
+    hole = {"week": 10, "flags": ["thin at RB"], "short_positions": ["RB"], "eligible_active": {"RB": 1},
+            "slots_to_fill": {"RB": 3}, "starters_on_bye": 0, "starters_on_bye_positions": []}
+    why = checkin.wire_reasons(probs, [{**hole, "week": 8, "short_positions": []}, hole])
     assert "tagged O" in why["QB"][0] and set(why) == {"QB", "RB", "WR", "TE"}
     assert why["RB"][0].startswith("No player in the FLEX") and any("week 10" in x for x in why["RB"])
 
@@ -597,3 +607,366 @@ async def test_the_comparison_hands_the_projection_engine_a_database(monkeypatch
     sentinel = object()
     await compare.compare_projections(LG, rows, 8, db=sentinel)
     assert seen["db"] is sentinel
+
+
+# ------------------------------------------------------------------ 1. player identity
+def N(slot, name, pos, team, bye=None, injury=None):
+    return {"slot": slot, "name": name, "position": pos, "team": team, "bye": bye, "injury": injury, "empty": False}
+
+
+def test_a_label_always_carries_team_and_position_and_the_key_never_the_surname():
+    from nfl_mcp.yahoo.idmap import player_key, player_label
+    rb = {"name": "Alex Warren", "team": "PIT", "position": "RB", "player_id": "101"}
+    te = {"name": "Sam Warren", "team": "CHI", "position": "TE", "player_id": "202"}
+    assert player_label("Alex Warren", "PIT", "RB") == "Alex Warren (PIT RB)"
+    assert player_label("Sam Warren", "WSH", "te") == "Sam Warren (WAS TE)"
+    assert player_label("Texans", "HOU", "DEF") == "Texans (HOU DEF)"
+    assert player_key(rb) != player_key(te) and player_key(rb) == "id:101"
+    unmapped = {"name": "Alex Warren", "team": "PIT", "position": "RB", "player_id": None}
+    assert player_key(unmapped) != player_key({**unmapped, "team": "CHI"})  # same name, other team: other player
+
+
+def test_two_surnames_never_collide_in_bye_outlook_problems_or_the_opponent():
+    slots = [N("RB", "Alex Warren", "RB", "PIT", bye=9), N("TE", "Sam Warren", "TE", "CHI", bye=10),
+             N("WR", "Pat Robinson", "WR", "ATL", bye=11, injury="O")]
+    out = {w["week"]: w for w in checkin.bye_outlook(slots, 8, 4)}
+    assert out[9]["starters_out"] == ["Alex Warren (PIT RB)"] and out[10]["starters_out"] == ["Sam Warren (CHI TE)"]
+    probs = checkin.find_problems(slots, 9)
+    assert next(p for p in probs if p["type"] == "starter_on_bye")["label"] == "Alex Warren (PIT RB)"
+    assert "Pat Robinson (ATL WR) is tagged O" in next(p for p in probs if p["type"] == "starter_out")["detail"]
+    side = {"team": {"mid": "5", "name": "Opp"}, "total_proj": 100.0, "starters": [
+        {"name": "Sam Warren", "team": "CHI", "position": "TE", "slot": "TE", "injury": "Q", "empty": False}]}
+    me = {"team": {"mid": "9", "name": "Me"}, "total_proj": 90.0, "starters": []}
+    opp, _ = checkin._opponent({"home": me, "away": side}, "9")
+    assert opp["injured_starters"][0]["label"] == "Sam Warren (CHI TE)"
+
+
+@pytest.mark.asyncio
+async def test_projections_are_matched_by_player_id_when_two_players_share_a_name():
+    async def project(players, **kw):
+        # the engine answers in a different order than asked, and both answers carry the same name
+        return {"success": True, "projections": [
+            {"player": "Pat Robinson", "player_id": "B", "projected_points": 4.0, "projection_source": "x"},
+            {"player": "Pat Robinson", "player_id": "A", "projected_points": 11.0, "projection_source": "x"}]}
+    rows = [{"name": "Pat Robinson", "team": "ATL", "position": "WR", "player_id": "A", "tag": "FA", "injury": None,
+             "our_projection": None, "upgrade": None, "projection_source": None, "label": "Pat Robinson (ATL WR)"},
+            {"name": "Pat Robinson", "team": "TEN", "position": "WR", "player_id": "B", "tag": "FA", "injury": None,
+             "our_projection": None, "upgrade": None, "projection_source": None, "label": "Pat Robinson (TEN WR)"}]
+    got = await checkin._project_wire(project, LG, 8, "WR", rows, [])
+    assert {r["team"]: r["our_projection"] for r in got} == {"ATL": 11.0, "TEN": 4.0}
+
+
+@pytest.mark.asyncio
+async def test_compare_matches_roster_rows_to_projections_by_id(monkeypatch):
+    async def fake(players, **kw):
+        return {"success": True, "week": 8, "projections": [
+            {"player": "Pat Robinson", "player_id": "2", "projected_points": 4.0, "projection_source": "sleeper_blend"},
+            {"player": "Pat Robinson", "player_id": "1", "projected_points": 11.0, "projection_source": "sleeper_blend"}]}
+    monkeypatch.setattr(projections, "project_players", fake)
+    rows = [{"slot": "WR", "name": "Pat Robinson", "team": "ATL", "position": "WR", "player_id": "1",
+             "injury": None, "yahoo_projection": 10.0, "bye_week": 11.0},
+            {"slot": "BN", "name": "Pat Robinson", "team": "TEN", "position": "WR", "player_id": "2",
+             "injury": None, "yahoo_projection": 5.0, "bye_week": 5.0}]
+    r = await compare.compare_projections(LG, rows, 8, db=object())
+    assert [p["our_projection"] for p in r["players"]] == [11.0, 4.0]
+    assert [p["label"] for p in r["players"]] == ["Pat Robinson (ATL WR)", "Pat Robinson (TEN WR)"]
+    assert any("both named Pat Robinson" in w for w in r["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_every_player_in_the_report_is_printed_with_team_and_position(pages):
+    r = await build()
+    assert all(s["label"].endswith(")") for s in r["roster"]["slots"])
+    assert all(b["label"] for b in r["verification"]["byes"]) and all(d["label"] for d in r["drop_candidates"])
+    assert all(row["label"].endswith(")") for rows in r["wire"]["positions"].values() for row in rows)
+    assert all("(" in x for w in r["byes"] for x in w["starters_out"])
+
+
+# ------------------------------------------------------------------ 2. drop candidates: the job test
+def B(slot, name, pos, mine, bye, team="X", injury=None, on_bye=False, **k):
+    return {"slot": slot, "name": name, "position": pos, "team": team, "our_projection": mine, "yahoo_projection": mine,
+            "bye_week": bye, "on_bye": on_bye, "injury": injury, "nfl_injury_status": None, "player_id": None, **k}
+
+
+def test_a_bye_week_bench_player_who_covers_a_starters_bye_is_not_free_to_cut():
+    players = [B("TE", "Tia Loveland", "TE", 10.0, 10), B("BN", "Kit Kittle", "TE", None, 8, on_bye=True),
+               B("QB", "Cal Cousins", "QB", 20.0, 13), B("BN", "Sam Shough", "QB", None, 8, on_bye=True)]
+    got = {d["name"]: d for d in checkin.drop_candidates(players, 8)}
+    kittle, shough = got["Kit Kittle"], got["Sam Shough"]
+    assert kittle["does_a_job"] and "covers the week 10 bye of Tia Loveland (X TE)" in kittle["note"]
+    assert "free to cut" not in kittle["note"] and "costs nothing" not in kittle["note"]
+    assert not shough["does_a_job"] and "does neither job" in shough["note"]
+    assert [d["name"] for d in checkin.drop_candidates(players, 8)][0] == "Sam Shough"
+
+
+def test_the_job_test_ranks_by_job_not_by_projection():
+    players = [B("RB", "Ann Starter", "RB", 15.0, 11), B("RB", "Bea Starter", "RB", 12.0, 5),
+               B("BN", "Cy Insurance", "RB", 3.0, 7),      # low projection, but covers Ann's week 11 bye
+               B("BN", "Di Nothing", "RB", 5.0, 11),       # beats Cy on projection; shares Ann's bye, so covers nothing
+               B("BN", "Ed Riser", "WR", 2.0, 6, role_trend="role_up")]
+    names = [d["name"] for d in checkin.drop_candidates(players, 8)]
+    assert names[0] == "Di Nothing"                        # does neither job: the drop
+    assert names.index("Cy Insurance") > names.index("Di Nothing")
+    row = next(d for d in checkin.drop_candidates(players, 8) if d["name"] == "Ed Riser")
+    assert row["path_to_role"] == "his role is rising (role_up)"
+
+
+def test_a_path_to_a_bigger_role_means_projecting_within_a_tie_of_the_weakest_starter():
+    players = [B("WR", "Una Starter", "WR", 12.0, 5), B("BN", "Vic Close", "WR", 10.6, 6),
+               B("BN", "Wes Far", "WR", 9.0, 6)]
+    got = {d["name"]: d for d in checkin.drop_candidates(players, 8)}
+    assert got["Vic Close"]["path_to_role"] and not got["Wes Far"]["path_to_role"]
+    assert [d["name"] for d in checkin.drop_candidates(players, 8)][0] == "Wes Far"
+
+
+def test_flagged_starters_get_their_bench_replacements_compared_with_the_wire_first():
+    players = [B("WR", "Una Starter", "WR", 12.0, 11, injury="Q"), B("WR", "Zed Steady", "WR", 14.0, 5),
+               B("BN", "Vic Bench", "WR", 10.4, 6), B("BN", "Wes Low", "WR", 8.1, 6)]
+    wire = {"positions": {"WR": [{"name": "Xan Wire", "team": "TEN", "position": "WR", "tag": "FA",
+                                  "our_projection": 10.6}]}}
+    row = checkin.bench_vs_wire(players, wire, 8)[0]
+    assert row["starter"] == "Una Starter (X WR)" and row["reason"] == "tagged Q"
+    assert row["bench_replacements"] == []               # nobody on the bench projects as high as the starter
+    assert row["best_bench"]["player"] == "Vic Bench (X WR)"
+    assert row["decision"].startswith("no add needed, use Vic Bench (X WR)")
+    wire["positions"]["WR"][0]["our_projection"] = 12.5  # 2.1 above the best bench option: outside the tie
+    row = checkin.bench_vs_wire(players, wire, 8)[0]
+    assert "worth an add" in row["decision"] and "no add needed" not in row["decision"]
+    row = checkin.bench_vs_wire([p for p in players if p["slot"] != "BN"], wire, 8)[0]
+    assert row["best_bench"] is None and "no eligible bench replacement" in row["decision"]
+
+
+def test_a_flagged_starter_on_bye_is_replaced_by_a_bench_player_who_plays():
+    players = [B("TE", "Tia Loveland", "TE", None, 8, on_bye=True), B("BN", "Kit Kittle", "TE", 9.0, 11)]
+    row = checkin.bench_vs_wire(players, {"positions": {}}, 8)[0]
+    assert row["reason"] == "on bye this week" and row["bench_replacements"][0]["player"] == "Kit Kittle (X TE)"
+    assert row["decision"] == "no add needed, use Kit Kittle (X TE)"
+
+
+# ------------------------------------------------------------------ 3. stale, conflicting and unverified injury data
+NOW = datetime(2026, 10, 28, 12, 0, tzinfo=UTC)
+
+
+def test_injury_flags_cover_stale_conflict_and_yahoo_only():
+    fresh = "2026-10-27T12:00:00+00:00"
+    old = "2026-10-24T12:00:00+00:00"
+    assert checkin.injury_flags({"injury": "Q", "nfl_injury_status": "Questionable",
+                                 "nfl_injury_reported_at": fresh}, now=NOW) == []
+    assert checkin.injury_flags({"injury": "Q", "nfl_injury_status": "Questionable",
+                                 "nfl_injury_reported_at": old}, now=NOW) == ["stale_injury"]
+    assert checkin.injury_flags({"injury": "Q", "nfl_injury_status": "Questionable"}, refresh_stale=True,
+                                now=NOW) == ["stale_injury"]
+    assert checkin.injury_flags({"injury": "Q", "nfl_injury_status": "Out"}, now=NOW) == ["injury_conflict"]
+    assert checkin.injury_flags({"injury": "Q"}, now=NOW) == ["yahoo_only"]
+    assert checkin.injury_flags({}, refresh_stale=True, now=NOW) == []   # a healthy player has nothing to flag
+
+
+def test_a_zero_caused_by_an_unverified_out_is_unknown_not_a_drop_candidate():
+    ghost = B("BN", "Gus Ghost", "RB", 0.0, 11, injury="Q", nfl_injury_status="Out", injury_flags=["injury_conflict"])
+    solid = B("BN", "Sol Solid", "RB", 6.0, 6)
+    cheap = B("BN", "Cho Cheap", "RB", 1.0, 6)
+    players = [B("RB", "Ann Starter", "RB", 15.0, 11), ghost, solid, cheap]
+    assert "conflict" in checkin.projection_unknown(ghost)
+    assert checkin.usable_projection(ghost) is None
+    review = checkin.bench_review(players, 8)
+    assert [d["name"] for d in review["ranked"]] == ["Cho Cheap", "Sol Solid"]
+    assert [u["name"] for u in review["unknown"]] == ["Gus Ghost"]
+    assert "injury conflict" in review["unknown"][0]["reason"] and "unknown" in review["unknown"][0]["note"]
+    # a confirmed zero (no flags) is a real zero
+    sure = {**ghost, "injury_flags": []}
+    assert checkin.projection_unknown(sure) is None and checkin.usable_projection(sure) == 0.0
+    # and an unknown projection is not the weakest starter a wire player is measured against
+    unknown_starter = {**ghost, "slot": "RB"}
+    assert checkin._baseline("RB", [unknown_starter, B("RB", "Ann Starter", "RB", 15.0, 11)])[0] == 15.0
+
+
+@pytest.mark.asyncio
+async def test_a_timed_out_refresh_flags_every_injured_player_stale_and_the_zero_unknown(pages):
+    async def slow(teams):
+        return [], {"partial": True}
+
+    async def cmp(league_id, rws, week):
+        players = [_row(r, week) for r in rws]
+        for o in players:
+            if o["name"] == "Zach Charbonnet":
+                o.update(injury="Q", nfl_injury_status="Out", our_projection=0.0)
+        return await fake_compare(players=players)(league_id, rws, week)
+    r = await build(refresh_injuries=slow, compare=cmp)
+    by = {s["name"]: s for s in r["roster"]["slots"]}
+    assert "stale_injury" in by["Zach Charbonnet"]["injury_flags"]
+    assert by["Zach Charbonnet"]["projection_unknown"]
+    assert [u["name"] for u in r["drop_unknown"]] == ["Zach Charbonnet"]
+    assert "Zach Charbonnet" not in [d["name"] for d in r["drop_candidates"]]
+    assert any("Zach Charbonnet (SEA RB)" in w and "stale" in w for w in r["warnings"])
+
+
+def test_agree_needs_designation_practice_and_body_part_to_all_match():
+    base = P("Pat", injury="Q", nfl="Questionable", practice_status="Limited", nfl_injury_body_part="Knee")
+    only_tag = checkin.verify_roster([base], 8, {})["injuries"][0]
+    assert only_tag["verdict"] == "partial"
+    assert only_tag["fields_missing"] == ["practice (Yahoo)", "body part (Yahoo)"] and only_tag["fields_differ"] == []
+    full = {**base, "yahoo_practice": "Limited", "yahoo_body_part": "Knee"}
+    assert checkin.verify_roster([full], 8, {})["injuries"][0]["verdict"] == "agree"
+    wrong = checkin.verify_roster([{**full, "yahoo_practice": "Full"}], 8, {})["injuries"][0]
+    assert wrong["verdict"] == "partial" and wrong["fields_differ"] == ["practice"]
+    assert "differs: practice" in wrong["detail"]
+    wrong = checkin.verify_roster([{**full, "yahoo_body_part": "Ankle"}], 8, {})["injuries"][0]
+    assert wrong["fields_differ"] == ["body part"]
+    gone = checkin.verify_roster([{**full, "practice_status": None, "nfl_injury_body_part": None}], 8, {})["injuries"][0]
+    assert gone["verdict"] == "partial" and gone["fields_missing"] == ["practice (nfl_mcp)", "body part (nfl_mcp)"]
+    text = " ".join(checkin.verification_warnings(checkin.verify_roster([base], 8, {})))
+    assert "check is partial" in text and "missing: practice (Yahoo), body part (Yahoo)" in text
+
+
+def test_news_posts_relayed_by_one_account_are_one_independent_origin():
+    items = [{"author": "agg.example", "text": "[Reporter A] x", "mentions_watched_player": ["Pat Robinson"]},
+             {"author": "agg.example", "text": "[Reporter B] y", "mentions_watched_player": ["Pat Robinson"]},
+             {"author": "other.example", "text": "z", "mentions_watched_player": ["Sam Warren"]}]
+    labels = {"Pat Robinson": ["Pat Robinson (ATL WR)"], "Sam Warren": ["Sam Warren (CHI TE)"]}
+    out = checkin.news_origins(items, labels)
+    assert out["independent_origins"] == 2 and out["origins"] == ["agg.example", "other.example"]
+    assert out["by_player"]["Pat Robinson (ATL WR)"] == {"posts": 2, "origins": ["agg.example"],
+                                                         "independent_origins": 1}
+    assert items[0]["single_source"] and items[0]["relayed_reporter"] == "Reporter A"
+    items.append({"author": "third.example", "text": "w", "mentions_watched_player": ["Pat Robinson"]})
+    out = checkin.news_origins(items, labels)
+    assert out["by_player"]["Pat Robinson (ATL WR)"]["independent_origins"] == 2 and not items[0]["single_source"]
+
+
+@pytest.mark.asyncio
+async def test_the_news_warning_counts_origins_not_posts(pages):
+    async def posts(handles, hours, limit, watch):
+        return {"items": [{"author": "agg.example", "text": "a", "mentions_watched_player": ["Kirk Cousins"]},
+                          {"author": "agg.example", "text": "b", "mentions_watched_player": ["Kirk Cousins"]}],
+                "errors": 0}
+    r = await build(posts=posts)
+    assert r["news"]["count"] == 2 and r["news"]["independent_origins"] == 1
+    assert any("2 post(s) from 1 independent origin(s)" in w and "single-source" in w for w in r["warnings"])
+
+
+# ------------------------------------------------------------------ 4. waiver targets joined to Yahoo's free agents
+def _yrow(name, team, pos, pid, tag):
+    return {"name": name, "label": f"{name} ({team} {pos})", "team": team, "position": pos, "player_id": pid, "tag": tag}
+
+
+def test_targets_are_kept_only_when_yahoo_lists_them_and_carry_yahoos_tag():
+    index = {"WR": [_yrow("Ann Receiver", "ATL", "WR", "11", "FA"), _yrow("Bo Receiver", "TEN", "WR", "12", "W (Oct 31)"),
+                    _yrow("Cy Receiver", "KC", "WR", None, "FA")],
+             "DEF": [_yrow("Steelers", "PIT", "DEF", "PIT", "W (Oct 28)")]}
+    raw = [{"name": "Ann Receiver", "team": "ATL", "position": "WR", "player_id": "11",
+            "waiver_recommendation": "add_now"},
+           {"name": "Bo R.", "team": "TEN", "position": "WR", "player_id": "12", "waiver_recommendation": "add_now"},
+           {"name": "Cy Receiver", "team": "KC", "position": "WR", "player_id": "13"},   # no id on Yahoo's row: name+team+pos
+           {"name": "Dee Receiver", "team": "DAL", "position": "WR", "player_id": "14"},  # Sleeper-only
+           {"name": "Wire Guy", "team": "PIT", "position": "DEF", "player_id": None},     # a defense joins on its team
+           {"name": "Ann Receiver", "team": "BUF", "position": "WR", "player_id": "99"}]  # same name, other team and id
+    warnings: list[str] = []
+    kept, dropped = checkin._join_targets(raw, index, warnings)
+    assert [(t["name"], t["yahoo_tag"]) for t in kept] == [("Ann Receiver", "FA"), ("Bo R.", "W (Oct 31)"),
+                                                           ("Cy Receiver", "FA"), ("Wire Guy", "W (Oct 28)")]
+    assert dropped == ["Dee Receiver (DAL WR)", "Ann Receiver (BUF WR)"]
+    assert any("Dee Receiver (DAL WR)" in w and "could not be matched to a Yahoo free agent" in w for w in warnings)
+    assert any("Bo R. (TEN WR)" in w and "waiver claim" in w for w in warnings)   # Yahoo's W beats "add_now"
+    assert not any("Ann Receiver (ATL WR)" in w for w in warnings)
+
+
+@pytest.mark.asyncio
+async def test_checkin_drops_targets_yahoo_does_not_list_and_says_so(pages):
+    first = await build(targets=None)
+    have = first["wire"]["positions"]["DEF"][0]
+
+    async def partial(**kw):
+        assert kw["positions"] == ["DEF", "RB", "WR"] and kw["limit"] == checkin.TARGET_POOL
+        return {"success": True, "targets": [
+            {"name": have["name"], "position": "DEF", "team": have["team"], "player_id": have["player_id"],
+             "upgrade_points": 5.0, "waiver_strategy": {"recommendation": "claim_now"}},
+            {"name": "Ghost Pool", "position": "DEF", "team": "ZZZ", "player_id": "ZZZ", "upgrade_points": 9.0}]}
+    r = await build(targets=partial)
+    assert [t["player_id"] for t in r["wire"]["targets"]] == [have["player_id"]]
+    assert r["wire"]["targets"][0]["yahoo_tag"] == have["tag"]
+    assert r["wire"]["targets_dropped"] == ["Ghost Pool (ZZZ DEF)"]
+    assert any("Ghost Pool (ZZZ DEF)" in w and "dropped from targets" in w for w in r["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_an_empty_target_list_is_explained_not_silent(pages):
+    async def nothing(**kw):
+        return {"success": True, "targets": [],
+                "message": "Nothing on waivers beats your current starters in week 8 (212 free agents checked)."}
+    r = await build(targets=nothing)
+    assert r["wire"]["targets"] == [] and "212 free agents checked" in r["wire"]["targets_note"]
+
+    async def unmappable(**kw):
+        return {"success": True, "targets": [{"name": "Ghost", "position": "DEF", "team": "ZZZ", "player_id": "ZZZ"}],
+                "message": "1 worth a claim"}
+    r = await build(targets=unmappable)
+    assert r["wire"]["targets"] == [] and "could not be matched to Yahoo free agents" in r["wire"]["targets_note"]
+
+    async def failed(**kw):
+        return {"success": False, "error": "no cached schedule"}
+    r = await build(targets=failed)
+    assert "no cached schedule" in r["wire"]["targets_note"]
+    assert any("get_waiver_targets failed" in w for w in r["warnings"])
+
+
+# ------------------------------------------------------------------ 5. bye planning
+def test_slots_to_fill_counts_the_flex_for_every_position_that_can_fill_it():
+    slots = [S("QB"), S("RB"), S("RB"), S("WR"), S("WR"), S("TE"), S("W/R/T"), S("K"), S("DEF"), S("BN"), S("IR")]
+    assert checkin.slots_to_fill(slots) == {"QB": 1, "RB": 3, "WR": 3, "TE": 2, "K": 1, "DEF": 1}
+    assert checkin.own_slots(slots)["RB"] == 2
+
+
+def test_thin_means_fewer_active_players_than_slots_to_fill_not_a_fixed_two():
+    slots = [S("QB", "Q1", "QB"), S("RB", "R1", "RB", bye=9), S("RB", "R2", "RB"), S("W/R/T", "R3", "RB"),
+             S("WR", "W1", "WR"), S("WR", "W2", "WR"), S("TE", "T1", "TE"), S("BN", "R4", "RB", bye=9),
+             S("BN", "W3", "WR"), S("BN", "T2", "TE")]
+    out = {w["week"]: w for w in checkin.bye_outlook(slots, 8, 4)}
+    assert out[8]["eligible_active"]["RB"] == 4 and out[8]["thin_positions"] == []
+    wk9 = out[9]
+    assert wk9["eligible_active"]["RB"] == 2 and wk9["slots_to_fill"]["RB"] == 3     # 2 is not enough for 3 slots
+    assert "thin at RB: 2 active for 3 slots to fill (counting the FLEX)" in wk9["flags"]
+    assert wk9["short_positions"] == []                  # two backs still cover the two RB slots: no wire read
+    assert wk9["starters_out"] == ["R1 (RB)"] and wk9["eligible_active"]["WR"] == 3
+
+
+def test_every_week_names_the_starters_out_and_the_eligible_players_left():
+    slots = [S("RB", "Ann Star", "RB", bye=9), S("RB", "Bo Star", "RB", bye=9), S("W/R/T", "Cy Flex", "WR", bye=10),
+             S("BN", "Di Bench", "RB")]
+    out = {w["week"]: w for w in checkin.bye_outlook(slots, 8, 4)}
+    assert out[9]["starters_out"] == ["Ann Star (RB)", "Bo Star (RB)"]
+    assert out[9]["eligible_active"]["RB"] == 1 and "RB" in out[9]["short_positions"]
+    assert out[10]["starters_out"] == ["Cy Flex (WR)"] and out[8]["starters_out"] == []
+    assert checkin.wire_positions([], [out[9]]) == ["RB"]
+
+
+# ------------------------------------------------------------------ matchup wording and the noise band
+@pytest.mark.parametrize("margin,says", [(12.53, "good matchup"), (11.9, "inside the noise band"),
+                                         (-11.9, "inside the noise band"), (-12.5, "tough matchup"),
+                                         (12.0, "inside the noise band")])
+def test_good_matchup_only_when_the_margin_is_outside_the_noise_band(margin, says):
+    text = checkin.matchup_read(margin, 12.0)
+    assert text.startswith(says)
+    assert ("good matchup" in text) is (says == "good matchup")
+
+
+def test_the_opponent_block_carries_the_margin_and_its_reading():
+    me = {"team": {"mid": "9", "name": "Me"}, "total_proj": 131.08, "starters": []}
+    them = {"team": {"mid": "5", "name": "Opp"}, "total_proj": 124.0, "starters": []}
+    opp, _ = checkin._opponent({"home": me, "away": them}, "9")
+    assert opp["margin"] == 7.08 and opp["read"].startswith("inside the noise band")
+    assert "good matchup" not in opp["read"]
+    them["total_proj"] = 118.55
+    opp, _ = checkin._opponent({"home": me, "away": them}, "9")
+    assert opp["read"].startswith("good matchup")
+
+
+@pytest.mark.parametrize("err,band", [(None, 12.0), (30.0, 15.0), (8.0, 10.0), (24.0, 12.0)])
+def test_noise_band_is_half_the_running_team_error_with_a_floor_of_ten(err, band):
+    assert checkin.noise_band_points(err) == band
+
+
+@pytest.mark.asyncio
+async def test_the_running_team_error_sets_the_band_for_the_gap_and_the_matchup(pages):
+    r = await build(compare=fake_compare(14.0), running_team_error=40.0)       # band 20: a 14 point gap is noise
+    assert r["roster"]["gap_is_noise"] and r["roster"]["noise_band"] == 20.0
+    assert r["opponent"]["noise_band"] == 20.0

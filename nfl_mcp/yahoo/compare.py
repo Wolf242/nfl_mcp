@@ -7,6 +7,11 @@ from __future__ import annotations
 
 import re
 
+from .idmap import player_key, player_label
+
+# A stored report is read whatever its age (the check-in judges staleness itself).
+INJURY_LOOKUP_HOURS = 24 * 30
+
 NOT_PROJECTED_SLOTS = ("IR",)
 _NO_SLEEPER = "no Sleeper projection for "
 _MORE = re.compile(r"\s*\(\+\d+ more\)\s*$")
@@ -25,6 +30,26 @@ def _without_bye_players(warnings: list[str], bye_names: set[str]) -> list[str]:
         if keep:
             out.append(_NO_SLEEPER + ", ".join(keep) + sep + tail)
     return out
+
+
+def _stored_report(db, name: str | None, team: str | None) -> dict:
+    """Body part and report time of nfl_mcp's stored injury report; empty when there is none."""
+    try:
+        rep = db.find_player_injury(name, team, max_age_hours=INJURY_LOOKUP_HOURS) if db is not None else None
+    except Exception:
+        rep = None
+    if not isinstance(rep, dict):
+        return {}
+    return {"body_part": rep.get("injury_type") or None, "reported_at": rep.get("updated_at") or rep.get("date_reported")}
+
+
+def _match_projection(r: dict, by_id: dict, by_name: dict) -> dict | None:
+    """The engine's row for a roster row: by player id, else by name when only one player has it."""
+    pid = r.get("player_id")
+    if pid not in (None, "") and str(pid) in by_id:
+        return by_id[str(pid)]
+    hits = by_name.get(r.get("name")) or []
+    return hits[0] if len(hits) == 1 else None
 
 
 async def compare_projections(league_id: str, rows: list[dict], week: int | None = None, db=None) -> dict:
@@ -48,20 +73,27 @@ async def compare_projections(league_id: str, rows: list[dict], week: int | None
     res = await project_players(
         [{"name": r["name"], "team": r["team"], "position": r["position"], "player_id": r["player_id"]}
          for r in live], league_id=league_id, week=week, db=db)
-    ours = {p.get("player"): p for p in res.get("projections") or []}
+    by_id: dict[str, dict] = {}
+    by_name: dict[str | None, list[dict]] = {}
+    for p in res.get("projections") or []:
+        if p.get("player_id") not in (None, ""):
+            by_id[str(p["player_id"])] = p
+        by_name.setdefault(p.get("player"), []).append(p)
     wk = res.get("week")
     out = []
     for r in rows:
-        p = ours.get(r["name"]) if r in live else None
+        p = _match_projection(r, by_id, by_name) if r in live else None
         # Yahoo's own bye week settles it even when nfl_mcp has no schedule cached for the week.
         on_bye = bool((p or {}).get("on_bye")) or (r.get("bye_week") is not None and wk is not None
                                                     and int(r["bye_week"]) == int(wk))
         mine = None if on_bye else (p.get("projected_points") if p else None)
         theirs = None if on_bye else r["yahoo_projection"]
         p = p or {}
+        report = _stored_report(db, r["name"], r["team"]) if (r["injury"] or p.get("injury_status")) else {}
         out.append({
             "slot": r["slot"], "name": r["name"], "team": r["team"], "position": r["position"],
-            "player_id": r.get("player_id"),
+            "player_id": r.get("player_id"), "key": player_key(r),
+            "label": player_label(r["name"], r["team"], r["position"]),
             "injury": r["injury"], "bye_week": r.get("bye_week"), "on_bye": on_bye,
             "yahoo_projection": theirs, "our_projection": mine,
             "model_projection": None if on_bye else p.get("model_projection"),
@@ -69,10 +101,15 @@ async def compare_projections(league_id: str, rows: list[dict], week: int | None
             "projection_source": "bye" if on_bye else p.get("projection_source"),
             "nfl_injury_status": p.get("injury_status"), "nfl_injury_source": p.get("injury_source"),
             "practice_status": p.get("practice_status"), "gameday_status": p.get("gameday_status"),
+            "nfl_injury_body_part": report.get("body_part"), "nfl_injury_reported_at": report.get("reported_at"),
+            "role_trend": p.get("role_trend"),
             "engine_bye_status": p.get("bye_status"),
             "gap": round(mine - theirs, 1) if mine is not None and theirs is not None else None,
         })
     warnings = _without_bye_players(list(res.get("warnings") or []), {x["name"] for x in out if x["on_bye"]})
+    names = [x["name"] for x in out]
+    for dup in sorted({n for n in names if names.count(n) > 1}):
+        warnings.append(f"Two players on the roster are both named {dup}: they are told apart by id and team, never by name.")
     started = [x for x in out if x["slot"] not in ("BN", "IR")]
     both = [x for x in started if x["gap"] is not None]
     if res.get("success") is False:

@@ -12,16 +12,38 @@ difference from the BFS constants, waiver order and your position), every roster
 nfl_mcp projection, a `problems` list (starters on bye, empty slots, starters tagged O/D, IR-slot players whose tag is not IR-eligible,
 a full bench), the wire for each problem or bye-hole position (`FA` vs `W (date)`), with every candidate projected in nfl_mcp's own
 model and ranked by its upgrade over what it would replace (zero when a starter is on bye or out), when the claims clear, and the
-top `get_waiver_targets` carrying Yahoo's own tag; `drop_candidates` (the bench, least useful this week first; a ranking by this
-week's projection only); the opponent (projected points, injured starters, byes); the next four weeks of byes (flagging weeks with
-fewer than two active RBs or two or more starters on bye); reporter posts that name your players; and `warnings`. A team-level
-projection gap under 12 points is reported as noise. Players on bye have no projection from anyone and show as on bye.
+top `get_waiver_targets` carrying Yahoo's own tag; `drop_candidates` (the bench ranked by a job test, below); the opponent
+(projected points, margin and its reading, injured starters, byes); the next four weeks of byes (who is out, how many eligible
+players are left at each position against the slots to fill, and weeks with two or more starters on bye); reporter posts that
+name your players; and `warnings`. A team-level projection gap under 12 points is reported as noise, and a matchup is called
+"good" only when the margin is outside that band. Players on bye have no projection from anyone and show as on bye.
+Every player is printed as `Full Name (TEAM POS)` and matched on the player id, never the surname.
+
+**Drops.** A bench spot has to do one of two jobs: insurance for a starter's bye or injury in the next four weeks (a TE2 covers
+the TE1's bye), or a believable path to a bigger role (projecting within 1.5 points of the weakest starter at his position, or a
+rising role). The drop is whoever does neither; a bye-week player is never "free to cut" if he covers a later bye.
+`wire.vs_bench` compares each flagged starter's bench replacements with the best wire pickup first: inside the 1.5-point tie the
+answer is "no add needed, use <bench player>". A bench player whose projection of 0 comes from an Out designation that is stale,
+in conflict with Yahoo's tag, or Yahoo-only is not ranked: he is listed in `drop_unknown` with the reason.
+
+**Waiver targets.** `get_waiver_targets` ranks Sleeper's player pool, which does not know what Yahoo holds on waivers. The check-in
+joins its targets to the Yahoo free-agent lists it read (by player id, then name+team+position, never the surname), keeps only
+the ones Yahoo lists and gives each Yahoo's own `FA` / `W (date)` tag. A target it cannot map is dropped and named in `warnings`.
+An empty list is explained in `wire.targets_note` (the tool's own "nothing beats your starters" message, or how many targets
+were dropped).
+
+**Byes.** A position is thin when its active players (not on bye, not tagged out, not on IR) number fewer than the slots it has
+to fill (RB: two slots plus the flex = 3). It is short, and its wire is read, only when they number fewer than its own slots.
 Nothing is added, dropped, claimed, traded or changed on Yahoo.
 
 **Verification.** Yahoo's injury tags and bye weeks are cross-checked where nfl_mcp has data: injury tags against nfl_mcp's own
 injury reports (with the week's practice line and the game-day decision), bye weeks against the cached NFL schedule for the next
-four weeks (fetched and cached if missing). Each item is `agree`, `conflict`, `yahoo_only` / `unverified` (no second source) or
-`other_only` (nfl_mcp has an injury report Yahoo does not show). A `yahoo_only` tag is Yahoo's word alone. How much gets verified
+four weeks (fetched and cached if missing). Each injury is `agree` (designation, practice status and body part all match), `partial` (the designations match but a
+field differs or is missing; `fields_differ` and `fields_missing` name them, and since Yahoo's roster page gives only the designation a
+Yahoo tag alone is `partial`, never `agree`), `conflict`, `yahoo_only` (no second source) or `other_only` (nfl_mcp has an injury
+report Yahoo does not show); each bye is `agree`, `conflict` or `unverified`. A `yahoo_only` tag is Yahoo's word alone. Players
+whose injury data is not to be trusted carry a flag: `stale_injury` (the refresh timed out or the stored report is more than two days
+old), `injury_conflict` or `yahoo_only`. News posts relayed by one aggregator account count as one independent origin. How much gets verified
 depends on what your server has cached: byes are checked against a schedule that is fetched if missing, and the check-in asks for fresh injury reports for your roster's teams first (bounded; on a timeout it uses what is stored and says so). Sleeper's injury status is one of nfl_mcp's injury sources, so a tag Sleeper contradicts shows as a `conflict`. Because nfl_mcp's projections now price those injury tags, a Q or D player's projection can sit well below Yahoo's.
 
 No league or team id lives in the repo. Set them in your environment:
