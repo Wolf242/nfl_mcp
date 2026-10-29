@@ -286,6 +286,7 @@ def injury_flags(p: dict, refresh_stale: bool = False, now: datetime | None = No
     if not (y or status):
         return []
     n = nfl_tag(status)
+    known = p.get("yahoo_known", True)  # False: Yahoo was not asked (a player not on the roster)
     flags = []
     if y and not status:
         flags.append("yahoo_only")
@@ -294,10 +295,10 @@ def injury_flags(p: dict, refresh_stale: bool = False, now: datetime | None = No
     reasons = stale_reasons(p, refresh_stale, now, week_start)
     if reasons:
         flags.append("stale_injury")
-    if n in SEASON_LONG_TAGS and y not in RESERVE_TAGS:
+    if known and n in SEASON_LONG_TAGS and y not in RESERVE_TAGS:
         flags.append("season_long_status")
     dated = [r for r in reasons if not r.startswith("the injury refresh")]
-    if status and not y and p.get("slot") != "IR" and (n in SEASON_LONG_TAGS or dated):
+    if known and status and not y and p.get("slot") != "IR" and (n in SEASON_LONG_TAGS or dated):
         flags.append("predates_activation")
     return flags
 
@@ -693,6 +694,39 @@ def bench_vs_wire(players: list[dict], wire: dict, week: int) -> list[dict]:
             row["decision"] = "no eligible bench replacement and no projected wire player"
         out.append(row)
     return out
+
+
+def close_calls(players: list[dict]) -> list[dict]:
+    """Starters and same-eligibility bench players whose projections are inside the tie band.
+
+    A starter is compared with every bench player who could take his slot (a WR slot takes a WR, the
+    flex an RB, WR or TE) and is not on bye or out. Projections within :data:`PLAYER_TIE_POINTS` of
+    each other cannot tell the two apart, so each pair is a toss-up, not a reason to switch; the pair
+    is the input for ``compare_players``. Closest first.
+    """
+    starters = [p for p in players if p["slot"] not in STARTER_EXCLUDED and p.get("name") and not p.get("on_bye")]
+    bench = [p for p in players if p["slot"] == "BN" and not p.get("on_bye") and p.get("injury") not in UNAVAILABLE_TAGS]
+    out = []
+    for st in starters:
+        base = usable_projection(st)
+        if base is None:
+            continue
+        allowed = FLEX_POSITIONS.get(slot_label(st["slot"]), [st["position"]])
+        for b in bench:
+            mine = usable_projection(b)
+            if mine is None or b["position"] not in allowed or abs(mine - base) >= PLAYER_TIE_POINTS:
+                continue
+            gap = round(mine - base, 1)
+            higher = (f"{label_of(b)} projects {abs(gap):.1f} higher, but inside the tie band that is not a reason to switch"
+                      if gap > 0 else f"{label_of(st)} projects {abs(gap):.1f} higher, inside the tie band"
+                      if gap < 0 else "identical projections")
+            out.append({
+                "slot": slot_label(st["slot"]), "starter": label_of(st), "starter_projection": base,
+                "bench": label_of(b), "bench_projection": mine, "gap": gap,
+                "reading": f"toss-up: {higher}. The projections cannot say who to start; look at usage, matchup and the "
+                           "tiebreakers with compare_players, and do not treat either as a pick.",
+                "compare": [label_of(st), label_of(b)]})
+    return sorted(out, key=lambda c: abs(c["gap"]))
 
 
 def _wire_row(p: dict) -> dict:
@@ -1258,6 +1292,7 @@ async def build_checkin(
     if project is not None:
         replacement = await replaceability(prov, project, league_id, week, cmp["players"], dict(wire_index), warnings)
     review = bench_review(cmp["players"], week, replacement)
+    close = close_calls(cmp["players"])
     drops, drop_unknown = review["ranked"], review["unknown"]
     verify = verify_roster(cmp["players"], week, sched, refresh_stale=refresh_stale, now=now, week_start=week_start)
     warnings += verification_warnings(verify)
@@ -1321,6 +1356,7 @@ async def build_checkin(
         "wire": wire,
         "drop_candidates": drops,
         "drop_unknown": drop_unknown,
+        "close_calls": close,
         "drop_basis": ("job test: insurance for a starter's bye or injury in the next "
                        f"{BYE_WEEKS_AHEAD} weeks, or a path to a bigger role; the drop is whoever does neither"),
         "opponent": opponent,

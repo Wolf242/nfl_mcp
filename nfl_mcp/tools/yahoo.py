@@ -201,6 +201,8 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
       neither.
       drop_unknown lists bench players whose projection of 0 comes from an unverified Out
       designation (stale, conflicting or Yahoo-only): they are not ranked
+    - close_calls: each starter and same-eligibility bench player whose projections are inside the
+      1.5-point tie band: a toss-up, never a pick; compare_players takes it from there
     - opponent: projected points, margin and its reading (a "good matchup" only outside the
       noise band), injured starters, starters on bye
     - byes: the next four weeks: which starters are out (full names), the active players at each
@@ -258,6 +260,91 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
         project=project, targets=waiver_target_tools.get_waiver_targets,
         posts=news_social.get_insider_posts, schedules=schedules if season else None,
         refresh_injuries=refresh_injuries, week_start=week_start)
+
+
+class _ReadOnlyDb:
+    """The shared database as compare_players uses it: reads pass through, and the one thing the
+    projection engine would append (``record_projections``, its pre-kickoff log for the weekly retro)
+    is skipped, so the comparison leaves nothing behind."""
+
+    def __init__(self, db):
+        self._db = db
+
+    def record_projections(self, *args, **kwargs) -> int:
+        return 0
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+@timing_decorator("compare_players", tool_type="yahoo")
+@_clean_errors
+async def compare_players(player_a: str, player_b: str, week: int | None = None,
+                          league_id: str | None = None) -> dict:
+    """Two players side by side for a start/sit call, scored on BFS. Read-only.
+
+    Names are "Full Name" or "Full Name (TEAM POS)"; a name that fits two players is an error that
+    lists them. For each player: the BFS game log this season (per game, mean, median, min, max, last
+    three, with the 100/200 and 300/400 yardage bonuses); usage by week (snap share, carry and target
+    share, touches, carries inside the 20 and 10 as a share of the team's, red-zone targets) and any
+    teammate whose snap share is rising and who takes the goal-line or passing-down work; the game
+    (team spread, total, implied total, home/away, kickoff) and which player locks first; the opponent's
+    BFS points allowed to the position this and last season with league rank, split into yards and
+    touchdowns (and whether the rank follows the noisy touchdowns or the stable yards) and EPA per rush
+    allowed; nfl_mcp's projection rescored to BFS beside Yahoo's with the gap; injury records for both
+    players and the opposing defense's key starters, each with its report date and stale / conflicting /
+    single-source flags; roster fit (slot, eligible alternatives, stacks and hedges in the same game)
+    when ``league_id`` (default NFL_MCP_DEFAULT_LEAGUE) is a Yahoo league and NFL_MCP_MY_ROSTER is set.
+
+    The verdict says "toss-up" whenever the projections are within the 1.5-point single-player tie band,
+    and then lists the tiebreakers in order (projection, red-zone share, floor and ceiling) with the
+    player each favours; a toss-up is never presented as a pick. Stats, snaps, play by play and the
+    schedule come from nflverse (key-free, cached per season); nothing is written anywhere.
+    """
+    from datetime import UTC, datetime
+
+    from .. import injury_service, nflverse_files, player_compare, projections
+    from ..database import get_shared_db
+    from ..practice_reports import practice_week_start, to_eastern
+    from ..week_context import resolve_season_week
+    from ..yahoo.compare import _stored_report
+
+    a = validate_string_input(player_a, "player_a", max_length=80, required=True)
+    b = validate_string_input(player_b, "player_b", max_length=80, required=True)
+    explicit = league_id not in (None, "")
+    lid = resolve_league(league_id)
+    if explicit and not is_yahoo_league(lid):
+        return _bad(lid)
+    season, week, _ = await resolve_season_week(None, week)
+    if not week:
+        return {"success": False, "error": "Could not determine the NFL week; pass week."}
+    db = _ReadOnlyDb(get_shared_db())
+
+    notes: list[str] = []
+    roster = None
+    mid = resolve_roster(None)
+    if lid and is_yahoo_league(lid) and mid and mid.isdigit():
+        async def roster():
+            return await (await get_provider(lid)).get_projection_inputs(mid)
+    else:
+        notes.append("No Yahoo league and team number (NFL_MCP_DEFAULT_LEAGUE, NFL_MCP_MY_ROSTER): roster fit and "
+                     "Yahoo projections are left out.")
+
+    async def project(players, **kw):
+        return await projections.project_players(players, db=db, **kw)
+
+    def team_injuries(team: str):
+        return db.get_team_injuries_from_cache(team, max_age_hours=injury_service.STORED_FALLBACK_MAX_AGE_HOURS)
+
+    src = player_compare.Sources(
+        weekly=nflverse_files.fetch_weekly_rows, snaps=nflverse_files.fetch_snap_counts, pbp=nflverse_files.fetch_pbp,
+        games=nflverse_files.fetch_games, project=project, roster=roster,
+        stored_report=lambda name, team: _stored_report(db, name, team), team_injuries=team_injuries,
+        week_start=practice_week_start(to_eastern(datetime.now(UTC)).date()))
+    result = await player_compare.compare_players(a, b, season=int(season), week=int(week), src=src)
+    if result.get("success"):
+        result["warnings"] = notes + result["warnings"]
+    return result
 
 
 @timing_decorator("verify_news_handles", tool_type="yahoo")

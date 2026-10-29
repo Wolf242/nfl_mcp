@@ -130,6 +130,7 @@ from .tools.yahoo import (
     check_yahoo_scoring,
     get_insider_posts,
     get_yahoo_free_agents,
+    compare_players,
     fantasy_checkin,
     get_yahoo_projection_comparison,
     get_yahoo_transactions,
@@ -178,6 +179,7 @@ IN_SEASON_TOOLS = frozenset({
     "get_usage_trends",
     "get_yahoo_waiver_order", "plan_yahoo_waiver_sequence", "get_yahoo_free_agents",
     "get_yahoo_transactions", "check_yahoo_scoring", "get_yahoo_projection_comparison", "fantasy_checkin",
+    "compare_players",
 })
 
 _PROFILE_HIDDEN = {
@@ -333,6 +335,7 @@ def _registered_tools() -> list[Callable]:
         plan_yahoo_waiver_sequence,
         get_yahoo_free_agents,
         fantasy_checkin,
+        compare_players,
         get_yahoo_projection_comparison,
         get_yahoo_transactions,
         check_yahoo_scoring,

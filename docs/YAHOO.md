@@ -3,7 +3,7 @@
 Pass a Yahoo league as `yahoo:<number>` (for BFS: `yahoo:1234567`) to any league tool. Rosters, matchups, league settings and
 users are read from Yahoo and returned in Sleeper's shape, so the lineup, waiver, opponent, bye and injury tools run on it
 unchanged. Nine extra tools are Yahoo/news specific (`get_yahoo_waiver_order`, `plan_yahoo_waiver_sequence`,
-`get_yahoo_free_agents`, `get_yahoo_transactions`, `check_yahoo_scoring`, `get_yahoo_projection_comparison`, `fantasy_checkin`, `get_insider_posts`, `verify_news_handles`).
+`get_yahoo_free_agents`, `get_yahoo_transactions`, `check_yahoo_scoring`, `get_yahoo_projection_comparison`, `fantasy_checkin`, `compare_players`, `get_insider_posts`, `verify_news_handles`).
 
 ## Weekly check-in and per-user defaults
 
@@ -78,6 +78,52 @@ check-in's rankings (the projection engine's own number is shown, and marked unk
 
 **News.** Posts that are player quotes or predictions ("guarantees a win") are dropped before leads are counted, unless they carry
 injury or availability wording; they are listed in `news.dropped`.
+
+**Close calls.** `close_calls` lists every starter and same-eligibility bench player (a WR slot takes a WR, the flex an RB, WR
+or TE; nobody on bye or out) whose projections are inside the 1.5-point tie band. Each is a toss-up, not a reason to switch: the pair
+goes to `compare_players`.
+
+## Comparing two players: `compare_players`
+
+`compare_players(player_a, player_b, week=None, league_id=None)` is a read-only start/sit tool for two QB/RB/WR/TE. Names are
+`Full Name` or `Full Name (TEAM POS)`; a name that fits two players (two Warrens) is an error that lists them. Everything is scored on
+**BFS** with the same scorer the rest of the Yahoo tools use, so the 100/200 rushing and receiving and 300/400 passing yardage bonuses
+(+2, then +5 in total) are in every game-log number, as are special-teams and fumble-return touchdowns. It works without a Yahoo league;
+with `NFL_MCP_DEFAULT_LEAGUE` (a Yahoo league) and `NFL_MCP_MY_ROSTER` set it also reads your roster for Yahoo projections and roster fit.
+
+Per player:
+
+* **Game log**: BFS points for each game before the week (per game, mean, median, min, max, the last three). A week with no stat line is
+  not counted (bye, missed game, or nothing recorded).
+* **Usage**: by week, offensive snap share (nflverse snap counts, matched to the stats by name and team), share of the team's carries and
+  targets, touches, carries inside the 20 and the 10 as a share of the team's, and red-zone targets (play by play). Season and last-3
+  summaries and a rising / falling / steady trend. **Teammates** are named when their snap share rose at least 10 points over the last
+  four played weeks and they took at least a quarter of the team's carries inside the 10 (goal line) or of its third/fourth-down
+  targets (passing downs).
+* **Game**: the team's spread (negative = favoured), total and implied team total from the schedule file (not live odds), home or away,
+  kickoff in Eastern time, roof and weather where given. `lock` says which player's game starts first, how many hours apart, and what that
+  does: the earlier player's choice has to be made before the later game's news exists, and a benched player cannot be swapped in once
+  his game has started.
+* **Opponent**: BFS points per game the defense allowed to the position this season and last, with rank (1 = allows the fewest, the
+  toughest), the same for yards-only and touchdown-only points, the stat splits (rushing yards and touchdowns, receptions, receiving
+  yards and touchdowns; passing for a QB), and EPA per rush allowed. `driver` says whether the rank follows yards (stable) or touchdowns
+  (noisy); `small_sample` is set under four games.
+* **Projections**: nfl_mcp's projection priced on BFS beside Yahoo's (Yahoo's own number is in the league's scoring and exists only for
+  players on your roster), and the gap; a gap under 1.5 points is noise.
+* **Injuries**: both players' records and the opposing defense's injured key starters (at least 60% of the defense's snaps over its last
+  three games), each with its report date and the check-in's stale (older than 3 days or before this NFL week), conflicting, Yahoo-only
+  and single-source flags. These are stored reports, not refreshed; run the check-in (which refreshes) first for fresh ones.
+* **Roster fit**: the slot he fills, the slots he is eligible for and who holds them, bench alternatives for his slot, and roster players
+  in the same game: stacks (his quarterback or receiver, his defense), players who share his touches, and hedges (the opponent's players).
+
+The **verdict** is `toss-up` whenever the projections are within the 1.5-point single-player tie band, with `pick: null`, and then lists
+the tiebreakers in order: projection, red-zone share (carries inside the 20 plus red-zone targets per game), floor and ceiling. Each
+names the player it favours, or `even` when the difference is negligible. A toss-up is never presented as a pick; outside the band the
+verdict is an `edge` with the same tiebreakers beside it. Unconfirmed availability (stale, conflicting or single-source injury data) is
+listed as a caveat.
+
+The nflverse files are the weekly player stats, `snap_counts`, `pbp` (play by play) and the `nfldata` schedule; each is fetched once per
+season and cached in memory (the current season refreshes), read-only.
 
 No league or team id lives in the repo. Set them in your environment:
 

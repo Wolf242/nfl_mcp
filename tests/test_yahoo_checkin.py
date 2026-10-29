@@ -1446,3 +1446,34 @@ async def test_quotes_and_predictions_are_dropped_before_leads_are_counted(pages
     assert r["news"]["by_player"]["Kirk Cousins (LV QB)"]["posts"] == 1
     assert any(w.startswith("Dropped 1 news post(s) that are player quotes or predictions") for w in r["warnings"])
     assert any("News: 1 post(s) from 1 independent origin(s)" in w for w in r["warnings"])
+
+
+# ------------------------------------------------------------------ close calls
+def test_close_calls_pair_a_starter_with_a_same_eligibility_bench_player_inside_the_tie_band():
+    players = [B("WR", "Una Wide", "WR", 12.0, 11), B("RB", "Ann Back", "RB", 15.0, 11), B("FLEX", "Fay Flex", "WR", 9.0, 11),
+               B("BN", "Vic Bench", "WR", 11.0, 6),           # 1.0 under Una: a close call
+               B("BN", "Rob Rush", "RB", 15.9, 6),            # 0.9 over Ann: a close call
+               B("BN", "Tia Tight", "TE", 9.4, 6),            # the flex takes a TE (0.4 over Fay), the WR slot does not
+               B("BN", "Wes Edge", "WR", 13.5, 6),            # exactly 1.5 over Una: outside the band
+               B("BN", "Bye Bob", "WR", 12.1, 8, on_bye=True),    # on bye: never
+               B("BN", "Gus Ghost", "WR", 0.0, 6, injury="Q", nfl_injury_status="Out", injury_flags=["injury_conflict"])]
+    got = checkin.close_calls(players)
+    assert [(c["starter"], c["bench"]) for c in got] == [("Fay Flex (X WR)", "Tia Tight (X TE)"), ("Ann Back (X RB)", "Rob Rush (X RB)"),
+                                                          ("Una Wide (X WR)", "Vic Bench (X WR)")]
+    assert [c["gap"] for c in got] == [0.4, 0.9, -1.0] and got[0]["slot"] == "FLEX"
+    assert "Tia Tight (X TE) projects 0.4 higher, but inside the tie band that is not a reason to switch" in got[0]["reading"]
+    assert "Una Wide (X WR) projects 1.0 higher, inside the tie band" in got[2]["reading"]
+    assert all(c["reading"].startswith("toss-up") and "do not treat either as a pick" in c["reading"] for c in got)
+    assert got[1]["compare"] == ["Ann Back (X RB)", "Rob Rush (X RB)"]
+    assert checkin.close_calls([B("RB", "Ann Back", "RB", 15.0, 11), B("BN", "Rob Rush", "RB", 15.0, 6)])[0]["reading"].startswith(
+        "toss-up: identical projections")
+    assert checkin.close_calls([B("RB", "Ann Back", "RB", None, 8, on_bye=True), B("BN", "Rob Rush", "RB", 15.0, 6)]) == []
+
+
+@pytest.mark.asyncio
+async def test_the_checkin_lists_its_close_calls_and_each_one_is_a_toss_up_not_a_pick(pages):
+    r = await build()
+    assert "close_calls" in r
+    for c in r["close_calls"]:
+        assert abs(c["gap"]) < checkin.PLAYER_TIE_POINTS and c["reading"].startswith("toss-up")
+    assert [abs(c["gap"]) for c in r["close_calls"]] == sorted(abs(c["gap"]) for c in r["close_calls"])

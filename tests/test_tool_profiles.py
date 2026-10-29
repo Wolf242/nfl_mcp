@@ -12,7 +12,7 @@ import pytest
 
 from nfl_mcp import tool_registry
 
-EXPECTED = {"season": 72, "full": 89, "offseason": 48}
+EXPECTED = {"season": 73, "full": 90, "offseason": 48}
 
 
 def expected(profile: str) -> int:

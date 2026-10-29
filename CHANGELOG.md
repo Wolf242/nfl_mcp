@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`compare_players`** (new tool, season/full profiles; 73 / 90 tools): two QB/RB/WR/TE side by
+  side for a start/sit call on BFS (shared scorer, cumulative yardage bonuses): game log, usage and
+  the teammates taking goal-line or passing-down work, spread/total/implied total/kickoff and which
+  player locks first, the opponent's BFS points allowed (this and last season, yards vs touchdowns,
+  EPA per rush), nfl_mcp and Yahoo projections, dated and flagged injuries (both players and the
+  opposing defense's key starters), roster fit with stacks and hedges, and a verdict that is a
+  "toss-up" (never a pick) inside the 1.5-point tie band, with ordered tiebreakers. Reads the
+  nflverse snap-count, play-by-play and schedule files (cached, read-only). `fantasy_checkin` gains
+  `close_calls`: every starter and same-eligibility bench player inside the tie band.
+
 - **`plan_roster_moves`** (new tool, season/full profiles; 62 / 79 tools): checks
   a multi-step roster plan — `add`, `drop`, `claim`, `ir_move`, `activate`,
   `start`, `bench`, each with an optional `drop`, `when` ("now", "waivers",
