@@ -125,40 +125,53 @@ def own_slots(slots: list[dict]) -> dict[str, int]:
     return own
 
 
-def slots_to_fill(slots: list[dict]) -> dict[str, int]:
-    """Players each position must supply if its own slots and every flex slot it can fill are used.
-
-    RB with two RB slots and one FLEX needs 3; a position that cannot play flex needs only its own.
-    """
-    need = own_slots(slots)
+def flex_slots(slots: list[dict]) -> tuple[int, list[str]]:
+    """How many flex starting slots there are, and the positions that can fill them."""
+    n, positions = 0, []
     for s in slots:
-        for pos in FLEX_POSITIONS.get(slot_label(s["slot"]), []):
-            need[pos] = need.get(pos, 0) + 1
+        allowed = FLEX_POSITIONS.get(slot_label(s["slot"]))
+        if allowed:
+            n += 1
+            positions += [p for p in allowed if p not in positions]
+    return n, positions
+
+
+def slots_to_fill(slots: list[dict]) -> dict[str, int]:
+    """Starting slots by kind: each position's own slots plus ``FLEX``. Sums to the starter count."""
+    need = own_slots(slots)
+    n, _ = flex_slots(slots)
+    if n:
+        need["FLEX"] = n
     return need
 
 
 def bye_outlook(slots: list[dict], week: int, weeks: int = BYE_WEEKS_AHEAD) -> list[dict]:
     """For each of the next ``weeks`` weeks: which starters are out, how many eligible players are
-    left at each position against the slots to fill, and any flags.
+    left at each position, and any flags.
 
     A position is thin when its active players (not on bye, not tagged out, not on IR) number fewer
-    than the slots it has to fill (RB: two slots plus the flex = 3); it is short, and worth a look on
-    the wire, when they number fewer than its own slots. A week is also flagged when two
-    or more starters are on bye, which can break the lineup while every position still has bodies.
+    than its own starting slots (QB 1, RB 2, WR 2, TE 1, K 1, DEF 1). The flex is never folded into
+    a position's count: it is a separate ``flex`` line, the players left across the flex-eligible
+    positions once their own slots are filled. A week is also flagged when two or more starters are
+    on bye, which can break the lineup while every position still has bodies.
     """
     rostered = [s for s in slots if not s.get("empty") and slot_label(s["slot"]) != "IR"]
-    need, own = slots_to_fill(slots), own_slots(slots)
+    own, need = own_slots(slots), slots_to_fill(slots)
+    n_flex, flex_pos = flex_slots(slots)
     out = []
     for w in range(week, week + weeks):
         on_bye = [s for s in rostered if _bye_week(s) == w]
         starters_out = [s for s in on_bye if _is_starter(s)]
         active = {pos: sum(1 for s in rostered if (s.get("position") or "").upper() == pos
                            and _bye_week(s) != w and s.get("injury") not in UNAVAILABLE_TAGS)
-                  for pos in need}
-        thin = [pos for pos, n in need.items() if active[pos] < n]
-        holes = [pos for pos in thin if active[pos] < own.get(pos, 0)]
-        flags = [f"thin at {pos}: {active[pos]} active for {need[pos]} slots to fill"
-                 + (" (counting the FLEX)" if need[pos] > own.get(pos, 0) else "") for pos in thin]
+                  for pos in dict.fromkeys([*own, *flex_pos])}
+        thin = [pos for pos, n in own.items() if active[pos] < n]
+        left = sum(max(0, active[p] - own.get(p, 0)) for p in flex_pos)
+        flex = ({"slots": n_flex, "positions": flex_pos, "eligible_left": left,
+                 "line": f"flex: {left} eligible players left across {'/'.join(flex_pos)}"} if n_flex else None)
+        flags = [f"thin at {pos}: {active[pos]} active for {own[pos]} slots to fill" for pos in thin]
+        if flex and left < n_flex:
+            flags.append(f"{flex['line']}, for {n_flex} flex slot(s)")
         if len(starters_out) >= STARTERS_ON_BYE_FLAG:
             flags.append(f"{len(starters_out)} starters on bye ("
                          + ", ".join(f"{label_of(s)} at {slot_label(s['slot'])}" for s in starters_out) + ")")
@@ -169,7 +182,8 @@ def bye_outlook(slots: list[dict], week: int, weeks: int = BYE_WEEKS_AHEAD) -> l
             "starters_out": [label_of(s) for s in starters_out],
             "starters_on_bye": len(starters_out),
             "starters_on_bye_positions": [s.get("position") for s in starters_out],
-            "eligible_active": active, "slots_to_fill": need, "thin_positions": thin, "short_positions": holes,
+            "eligible_active": active, "slots_to_fill": need, "thin_positions": thin, "short_positions": thin,
+            "flex": flex,
             "active_rbs": active.get("RB", 0),
             "flags": flags, "flag": "; ".join(flags) if flags else None,
         })
@@ -519,13 +533,17 @@ def drop_candidates(players: list[dict], week: int = 0) -> list[dict]:
 
 def bench_vs_wire(players: list[dict], wire: dict, week: int) -> list[dict]:
     """For each flagged starter (on bye or injury-tagged), the bench players who can fill in this
-    week against the best projected wire pickup at his position.
+    week against the best projected wire pickup, both limited to the slot he occupies: a WR slot
+    takes a WR only, the flex takes an RB, WR or TE (judged by the player's own position, not the
+    page the wire row was read from).
 
     The bench is checked first: when the wire pickup beats the best bench option by less than a tie
     (:data:`PLAYER_TIE_POINTS`), the answer is "no add needed, use <bench player>".
     """
     starters = [p for p in players if p["slot"] not in ("BN", "IR") and p.get("name")]
     bench = [p for p in players if p["slot"] == "BN"]
+    wire_all = [r for rows in wire["positions"].values() for r in rows]
+    tie = f"{PLAYER_TIE_POINTS:g}-point tie band"
     out = []
     for st in starters:
         if not (st.get("on_bye") or st.get("injury")):
@@ -536,36 +554,38 @@ def bench_vs_wire(players: list[dict], wire: dict, week: int) -> list[dict]:
         options.sort(key=lambda b: -usable_projection(b))
         same_or_better = [b for b in options if base is None or usable_projection(b) >= base]
         best_bench = options[0] if options else None
-        wire_rows = [r for r in wire["positions"].get(st["position"], []) if r.get("our_projection") is not None]
+        wire_rows = [r for r in wire_all if (r.get("position") or "").upper() in allowed
+                     and r.get("our_projection") is not None]
         best_wire = max(wire_rows, key=lambda r: r["our_projection"]) if wire_rows else None
         reason = "on bye this week" if st.get("on_bye") else f"tagged {st['injury']}"
         row = {
-            "starter": label_of(st), "slot": slot_label(st["slot"]), "reason": reason,
-            "starter_projection": base,
+            "starter": label_of(st), "slot": slot_label(st["slot"]), "eligible_positions": allowed,
+            "reason": reason, "starter_projection": base,
             "bench_replacements": [{"player": label_of(b), "projection": usable_projection(b)} for b in same_or_better],
             "best_bench": ({"player": label_of(best_bench), "projection": usable_projection(best_bench)}
                            if best_bench else None),
-            "best_wire": ({"player": f"{best_wire['name']} ({best_wire.get('team')} {best_wire.get('position')})",
-                           "tag": best_wire["tag"], "projection": best_wire["our_projection"]} if best_wire else None),
+            "best_wire": ({"player": best_wire.get("label") or label_of(best_wire), "tag": best_wire["tag"],
+                           "projection": best_wire["our_projection"]} if best_wire else None),
+            "gap": None,
         }
-        if best_bench and (best_wire is None or best_wire["our_projection"] - usable_projection(best_bench)
-                           < PLAYER_TIE_POINTS):
-            row["gap"] = (round(best_wire["our_projection"] - usable_projection(best_bench), 1) if best_wire else None)
-            row["decision"] = f"no add needed, use {label_of(best_bench)}"
-            if best_wire:
-                row["decision"] += (f" (the best wire pickup is {row['gap']:+.1f} against him: "
-                                    + ("a tie" if row["gap"] > -PLAYER_TIE_POINTS else "no better")
-                                    + f", under the {PLAYER_TIE_POINTS:g}-point tie band)")
-        elif best_bench:
+        if best_bench and best_wire:
             row["gap"] = round(best_wire["our_projection"] - usable_projection(best_bench), 1)
-            row["decision"] = (f"{row['best_wire']['player']} ({best_wire['tag']}) projects {row['gap']:.1f} above "
+        gap = row["gap"]
+        if best_bench and (best_wire is None or gap < PLAYER_TIE_POINTS):
+            row["decision"] = f"no add needed, use {label_of(best_bench)}"
+            if best_wire and gap > -PLAYER_TIE_POINTS:
+                row["decision"] += (f" (the best wire pickup, {row['best_wire']['player']}, is {gap:+.1f} against him: "
+                                    f"a tie inside the {tie})")
+            elif best_wire:
+                row["decision"] += (f": the best wire pickup, {row['best_wire']['player']}, is worse than "
+                                    f"{label_of(best_bench)} by {-gap:.1f} (more than the {tie})")
+        elif best_bench:
+            row["decision"] = (f"{row['best_wire']['player']} ({best_wire['tag']}) projects {gap:.1f} above "
                                f"the best bench option {label_of(best_bench)}: worth an add")
         elif best_wire:
-            row["gap"] = None
             row["decision"] = (f"no eligible bench replacement; best wire pickup {row['best_wire']['player']} "
                                f"({best_wire['tag']})")
         else:
-            row["gap"] = None
             row["decision"] = "no eligible bench replacement and no projected wire player"
         out.append(row)
     return out
@@ -579,9 +599,67 @@ def _wire_row(p: dict) -> dict:
             "our_projection": None, "upgrade": None, "projection_source": None}
 
 
-def _baseline(pos: str, players: list[dict]) -> tuple[float | None, str]:
-    """What a wire player at ``pos`` would replace: 0 when a starter there is on bye or out, else the
-    weakest starter's projection (a starter whose projection is unknown is left out)."""
+def starter_holes(slots: list[dict], players: list[dict]) -> list[dict]:
+    """Starting slots nobody can fill this week: empty, or held by a player on bye or out.
+
+    Each projects 0 when a wire player is measured against the weakest starter. ``positions`` are the
+    positions that could fill it (a FLEX slot takes RB, WR or TE; every other slot takes its own).
+    A player out only by an unverified nfl_mcp designation is not a hole: his status is unknown.
+    """
+    holes = []
+    for s in slots:
+        label = slot_label(s["slot"])
+        if s.get("empty") and label not in STARTER_EXCLUDED:
+            holes.append({"slot": label, "kind": "empty", "player": None,
+                          "positions": FLEX_POSITIONS.get(label, [label]),
+                          "reason": f"No player in the {label} starting slot"})
+    for p in players:
+        if p["slot"] in STARTER_EXCLUDED or not p.get("name"):
+            continue
+        gone = p.get("injury") == "O" or (nfl_tag(p.get("nfl_injury_status")) == "O" and not p.get("injury_flags"))
+        if p.get("on_bye") or gone:
+            kind = "on bye" if p.get("on_bye") else "out"
+            holes.append({"slot": p["slot"], "kind": kind, "player": label_of(p),
+                          "positions": FLEX_POSITIONS.get(p["slot"], [p["position"]]),
+                          "reason": f"{label_of(p)} is {kind}"})
+    return holes
+
+
+def hole_targets(holes: list[dict], wire: dict) -> tuple[list[dict], list[str]]:
+    """The best available Yahoo free agent for each hole, with Yahoo's own FA / W (date) tag.
+
+    A hole is filled by the best-projected wire player whose own position can fill that slot (a
+    row's position, not the page it was read from), never the same player twice. Returns the targets
+    and a note for each hole no wire player could fill.
+    """
+    targets, used, notes = [], set(), []
+    for h in holes:
+        pool = [r for rows in wire["positions"].values() for r in rows
+                if (r.get("position") or "").upper() in h["positions"] and r.get("tag")
+                and player_key(r) not in used]
+        projected = [r for r in pool if r.get("our_projection") is not None]
+        best = max(projected, key=lambda r: r["our_projection"]) if projected else (pool[0] if pool else None)
+        if best is None:
+            notes.append(f"no Yahoo free agent was read for the {h['slot']} hole ({h['reason']})")
+            continue
+        used.add(player_key(best))
+        mine = best.get("our_projection")
+        targets.append({
+            "name": best["name"], "label": best.get("label") or label_of(best), "position": best.get("position"),
+            "team": best.get("team"), "player_id": best.get("player_id"), "projected_points": mine,
+            "upgrade_points": round(mine, 1) if mine is not None else None,
+            "verdict": "fills_hole", "source": "wire_hole", "fills": h["reason"],
+            "waiver_recommendation": None, "tag": best["tag"], "yahoo_tag": best["tag"]})
+    return targets, notes
+
+
+def _baseline(pos: str, players: list[dict], holes: list[dict] | None = None) -> tuple[float | None, str]:
+    """What a wire player at ``pos`` would replace: 0 when a starting slot he could fill is empty, or
+    its player is on bye or out; else the weakest starter's projection (a starter whose projection
+    is unknown is left out)."""
+    for h in holes or []:
+        if pos in h["positions"]:
+            return 0.0, h["reason"]
     at = [p for p in players if p["position"] == pos and p["slot"] not in ("BN", "IR")]
     if not at:
         return None, "no starter at this position"
@@ -593,7 +671,7 @@ def _baseline(pos: str, players: list[dict]) -> tuple[float | None, str]:
 
 
 async def _project_wire(project, league_id: str, week: int, pos: str, rows: list[dict],
-                        players: list[dict]) -> list[dict]:
+                        players: list[dict], holes: list[dict] | None = None) -> list[dict]:
     """Project the candidates in nfl_mcp's own model and rank them; the upgrade is over what they replace.
 
     Results are matched to candidates by player id, then by name only when one result carries it.
@@ -606,7 +684,7 @@ async def _project_wire(project, league_id: str, week: int, pos: str, rows: list
         if p.get("player_id") not in (None, ""):
             by_id[str(p["player_id"])] = p
         by_name.setdefault(p.get("player"), []).append(p)
-    base, base_note = _baseline(pos, players)
+    base, base_note = _baseline(pos, players, holes)
     for r in rows:
         p = by_id.get(str(r["player_id"])) if r.get("player_id") not in (None, "") else None
         if p is None and len(by_name.get(r["name"]) or []) == 1:
@@ -852,9 +930,19 @@ async def build_checkin(
     for w in outlook:
         if w["flags"] and w["week"] != week:
             warnings.append(f"Week {w['week']}: " + "; ".join(w["flags"]) + ".")
+    holes = starter_holes(slots, cmp["players"])
     positions = wire_positions(problems, outlook)
+    for h in holes:  # every position that could fill an empty, bye or out starting slot is read, K and DEF included
+        for pos in h["positions"]:
+            if pos in WIRE_POSITIONS and pos not in positions:
+                positions.append(pos)
+    reasons = wire_reasons(problems, outlook)
+    for h in holes:
+        for pos in h["positions"]:
+            if pos in WIRE_POSITIONS and not any((h["player"] or h["reason"]) in r for r in reasons.get(pos, [])):
+                reasons.setdefault(pos, []).append(h["reason"])
 
-    wire: dict = {"positions": {}, "reasons": wire_reasons(problems, outlook), "targets": [], "timing": []}
+    wire: dict = {"positions": {}, "reasons": reasons, "holes": holes, "targets": [], "timing": []}
     wire_index: dict[str, list[dict]] = {}
     for pos in positions:
         try:
@@ -863,7 +951,7 @@ async def build_checkin(
             candidates = wire_rows[:WIRE_CANDIDATES]
             if project is not None:
                 try:
-                    candidates = await _project_wire(project, league_id, week, pos, candidates, cmp["players"])
+                    candidates = await _project_wire(project, league_id, week, pos, candidates, cmp["players"], holes)
                 except Exception as e:
                     warnings.append(f"Could not project the {pos} wire: {e}")
             wire["positions"][pos] = candidates[:wire_depth]
@@ -872,6 +960,7 @@ async def build_checkin(
     wire["timing"] = claim_timing(wire, today)
     wire["vs_bench"] = bench_vs_wire(cmp["players"], wire, week)
     wire["targets_note"] = None
+    joined: list[dict] = []
     if targets is not None and not wire_index:
         wire["targets_note"] = ("No position has a bye hole, injury or thin depth this week, and no Yahoo "
                                 "free-agent list was read, so no targets were ranked.")
@@ -890,10 +979,9 @@ async def build_checkin(
                 warnings.append("get_waiver_targets failed: " + str(t.get("error")))
                 wire["targets_note"] = "get_waiver_targets failed: " + str(t.get("error"))
             else:
-                kept, dropped = _join_targets(raw, wire_index, warnings)
-                wire["targets"] = kept[:TARGETS_SHOWN]
+                joined, dropped = _join_targets(raw, wire_index, warnings)
                 wire["targets_dropped"] = dropped
-                if not wire["targets"]:
+                if not joined:
                     wire["targets_note"] = (
                         (t.get("message") or "The target ranking returned nothing.")
                         + (f" {len(raw)} ranked target(s) could not be matched to Yahoo free agents and were dropped."
@@ -902,6 +990,16 @@ async def build_checkin(
                                 "kept only if Yahoo lists them as available; each carries Yahoo's own FA / W tag.")
         except Exception as e:
             warnings.append(f"get_waiver_targets unavailable: {e}")
+    # A slot that is empty, or held by a player on bye or out, projects 0: the best available Yahoo player
+    # for it is always a target, whatever the Sleeper-pool ranking said.
+    hole_t, hole_notes = hole_targets(holes, wire)
+    seen = {player_key(t) for t in hole_t}
+    wire["targets"] = (hole_t + [t for t in joined if player_key(t) not in seen])[:TARGETS_SHOWN]
+    if holes:
+        wire["targets_note"] = (
+            f"{len(holes)} starting slot(s) are empty, on bye or out ({'; '.join(h['reason'] for h in holes)}): "
+            "the best available Yahoo free agent for each is listed as a target"
+            + (f"; {'; '.join(hole_notes)}" if hole_notes else "") + ".")
 
     review = bench_review(cmp["players"], week)
     drops, drop_unknown = review["ranked"], review["unknown"]

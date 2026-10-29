@@ -30,10 +30,19 @@ in conflict with Yahoo's tag, or Yahoo-only is not ranked: he is listed in `drop
 joins its targets to the Yahoo free-agent lists it read (by player id, then name+team+position, never the surname), keeps only
 the ones Yahoo lists and gives each Yahoo's own `FA` / `W (date)` tag. A target it cannot map is dropped and named in `warnings`.
 An empty list is explained in `wire.targets_note` (the tool's own "nothing beats your starters" message, or how many targets
-were dropped).
+were dropped). A starting slot that is empty, or held by a player on bye or out, is a hole and projects 0: the wire for every
+position that could fill it (K and DEF included) is read, a wire player is measured against 0 there, and the best available Yahoo
+free agent for each hole is always a target (`source: wire_hole`, with Yahoo's `FA` / `W (date)` tag). While a hole exists the note
+never says nothing beats your starters.
 
-**Byes.** A position is thin when its active players (not on bye, not tagged out, not on IR) number fewer than the slots it has
-to fill (RB: two slots plus the flex = 3). It is short, and its wire is read, only when they number fewer than its own slots.
+**Byes.** A position is thin when its active players (not on bye, not tagged out, not on IR) number fewer than its own
+starting slots (QB 1, RB 2, WR 2, TE 1, K 1, DEF 1); a thin position's wire is read. The flex is never folded into a position's
+count: each week carries a separate `flex` line ("flex: N eligible players left across RB/WR/TE", the players beyond the own slots),
+flagged only when it is below the number of flex slots. `slots_to_fill` lists the own slots plus `FLEX` and sums to the nine starters.
+
+**Bench vs wire.** `wire.vs_bench` compares replacements only for the slot the flagged starter occupies: a WR slot takes a WR,
+the flex takes an RB, WR or TE, judged by each player's own position (not the wire page he was read from). A wire player worse
+than the best bench option by more than the 1.5-point tie band is reported as "worse than <bench player> by X".
 Nothing is added, dropped, claimed, traded or changed on Yahoo.
 
 **Verification.** Yahoo's injury tags and bye weeks are cross-checked where nfl_mcp has data: injury tags against nfl_mcp's own

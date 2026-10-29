@@ -102,6 +102,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a warning and an empty list is explained. (5) The thin-position flag compares active players
   to the slots to fill (RB: 2 + flex = 3) and each week names the starters out; "good matchup"
   appears only outside the noise band.
+- **`fantasy_checkin` (Yahoo)**: follow-ups. Starting slots that are empty or held by a player on
+  bye or out project 0, their positions (K and DEF too) are always read from the wire, and the best
+  available Yahoo free agent for each is a target, so "nothing beats your starters" is never said
+  while a slot is open. Thin positions are judged against each position's own slot count (QB 1,
+  RB 2, WR 2, TE 1, K 1, DEF 1) with the flex as a separate line; `slots_to_fill` sums to 9.
+  `wire.vs_bench` only compares players who can fill the flagged starter's slot, and says "worse
+  than <bench player> by X (more than the 1.5-point tie band)" when the wire pickup is clearly worse.
 
 - **`get_player_ownership`**: once a team's game this week has started, an unrostered
   player also gets `in_time_for_next_kickoff` / `next_kickoff_local` — a claim

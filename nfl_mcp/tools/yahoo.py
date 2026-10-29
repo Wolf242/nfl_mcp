@@ -188,19 +188,22 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
       IR-eligible, a full bench
     - wire: FA / W (date) tags at each position with a bye hole or a problem, each candidate
       projected and ranked with its upgrade over what it replaces, when claims clear, vs_bench
-      (each flagged starter's bench replacements compared with the best wire pickup first: inside
-      a 1.5-point tie the answer is "no add needed, use <bench player>"), and the top
-      get_waiver_targets kept only if Yahoo lists them as available, each with Yahoo's own tag
+      (each flagged starter's bench replacements compared with the best wire pickup first, both
+      limited to the slot he occupies: inside a 1.5-point tie the answer is "no add needed, use
+      <bench player>"), holes (starting slots that are empty or held by a player on bye or out,
+      each projecting 0), and targets: the best available Yahoo free agent for every hole, then the
+      top get_waiver_targets kept only if Yahoo lists them as available, each with Yahoo's own tag
       (a target that cannot be mapped to a Yahoo player is dropped and named in warnings;
-      targets_note says why the list is empty)
+      targets_note says why the list is empty or which holes it fills)
     - drop_candidates: the bench ranked by a job test: insurance for a starter's bye or injury in
       the next four weeks, or a path to a bigger role; the drop is whoever does neither.
       drop_unknown lists bench players whose projection of 0 comes from an unverified Out
       designation (stale, conflicting or Yahoo-only): they are not ranked
     - opponent: projected points, margin and its reading (a "good matchup" only outside the
       noise band), injured starters, starters on bye
-    - byes: the next four weeks: which starters are out (full names), the eligible active players
-      left at each position against the slots to fill (RB: two slots plus the flex = 3), and flags
+    - byes: the next four weeks: which starters are out (full names), the active players at each
+      position against its own slots (QB 1, RB 2, WR 2, TE 1, K 1, DEF 1; thin when fewer), the
+      flex as a separate line ("flex: N eligible players left across RB/WR/TE"), and flags
     - verification: each injury tag and bye week checked against nfl_mcp's injury data and the NFL
       schedule: injuries agree (designation, practice and body part all match), partial (the
       differing or missing fields are named), conflict, yahoo_only or other_only; byes agree,

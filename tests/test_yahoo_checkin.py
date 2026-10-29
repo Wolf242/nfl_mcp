@@ -194,12 +194,14 @@ async def test_checkin_flags_the_defense_on_bye_and_reads_the_defense_wire(pages
     tags = {p["tag"] for p in r["wire"]["positions"]["DEF"]}
     assert tags and all(t.startswith("W (") for t in tags)
     assert any(w.startswith("Week 11:") and "3 starters on bye" in w for w in r["warnings"])
-    t = r["wire"]["targets"][0]
-    assert t["name"] == "Wire Guy" and t["yahoo_tag"].startswith("W (")
+    by = {t["name"]: t for t in r["wire"]["targets"]}
+    # "Wire Guy" is the PIT defense, which is also the best fill for the Texans' bye hole: one row, not two
+    assert "Wire Guy" not in by and by["Steelers"]["yahoo_tag"].startswith("W (")
     # nfl_mcp says add now; Yahoo's tag is a waiver claim, so the check-in says Yahoo's tag wins
     assert any("Wire Guy" in w and "waiver claim" in w for w in r["warnings"])
     # Sleeper writes Washington as WSH, Yahoo as WAS; the tag must still be found, and from outside the top few
-    assert r["wire"]["targets"][1]["yahoo_tag"].startswith("W (")
+    assert by["WSH"]["yahoo_tag"].startswith("W (")
+    assert r["wire"]["targets"][0]["source"] == "wire_hole"       # the bye hole's best fill comes first
 
 
 @pytest.mark.asyncio
@@ -231,7 +233,8 @@ async def test_a_failing_sub_call_becomes_a_warning_not_a_failure(pages):
     async def boom_posts(*a):
         raise RuntimeError("bluesky down")
     r = await build(targets=boom, posts=boom_posts)
-    assert r["success"] and r["wire"]["targets"] == [] and r["news"]["count"] == 0
+    # the tool failed, but the Texans' bye hole is still filled from the Yahoo wire
+    assert r["success"] and [t["source"] for t in r["wire"]["targets"]] == ["wire_hole"] and r["news"]["count"] == 0
     text = " ".join(r["warnings"])
     assert "get_waiver_targets unavailable: no schedule" in text and "News unavailable: bluesky down" in text
 
@@ -889,7 +892,8 @@ async def test_checkin_drops_targets_yahoo_does_not_list_and_says_so(pages):
 
 
 @pytest.mark.asyncio
-async def test_an_empty_target_list_is_explained_not_silent(pages):
+async def test_an_empty_target_list_is_explained_not_silent(pages, monkeypatch):
+    monkeypatch.setattr(checkin, "starter_holes", lambda slots, players: [])   # no empty, bye or out slot
     async def nothing(**kw):
         return {"success": True, "targets": [],
                 "message": "Nothing on waivers beats your current starters in week 8 (212 free agents checked)."}
@@ -910,22 +914,24 @@ async def test_an_empty_target_list_is_explained_not_silent(pages):
 
 
 # ------------------------------------------------------------------ 5. bye planning
-def test_slots_to_fill_counts_the_flex_for_every_position_that_can_fill_it():
+def test_slots_to_fill_lists_each_positions_own_slots_and_the_flex_once():
     slots = [S("QB"), S("RB"), S("RB"), S("WR"), S("WR"), S("TE"), S("W/R/T"), S("K"), S("DEF"), S("BN"), S("IR")]
-    assert checkin.slots_to_fill(slots) == {"QB": 1, "RB": 3, "WR": 3, "TE": 2, "K": 1, "DEF": 1}
-    assert checkin.own_slots(slots)["RB"] == 2
+    need = checkin.slots_to_fill(slots)
+    assert need == {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DEF": 1, "FLEX": 1}
+    assert sum(need.values()) == 9                    # the nine starters, the flex counted once
+    assert checkin.own_slots(slots) == {"QB": 1, "RB": 2, "WR": 2, "TE": 1, "K": 1, "DEF": 1}
 
 
-def test_thin_means_fewer_active_players_than_slots_to_fill_not_a_fixed_two():
+def test_thin_means_fewer_active_players_than_the_positions_own_slots_and_never_counts_the_flex():
     slots = [S("QB", "Q1", "QB"), S("RB", "R1", "RB", bye=9), S("RB", "R2", "RB"), S("W/R/T", "R3", "RB"),
              S("WR", "W1", "WR"), S("WR", "W2", "WR"), S("TE", "T1", "TE"), S("BN", "R4", "RB", bye=9),
              S("BN", "W3", "WR"), S("BN", "T2", "TE")]
     out = {w["week"]: w for w in checkin.bye_outlook(slots, 8, 4)}
     assert out[8]["eligible_active"]["RB"] == 4 and out[8]["thin_positions"] == []
     wk9 = out[9]
-    assert wk9["eligible_active"]["RB"] == 2 and wk9["slots_to_fill"]["RB"] == 3     # 2 is not enough for 3 slots
-    assert "thin at RB: 2 active for 3 slots to fill (counting the FLEX)" in wk9["flags"]
-    assert wk9["short_positions"] == []                  # two backs still cover the two RB slots: no wire read
+    assert wk9["eligible_active"]["RB"] == 2 and wk9["slots_to_fill"]["RB"] == 2    # two backs fill the two RB slots
+    assert wk9["thin_positions"] == [] and wk9["short_positions"] == [] and wk9["flags"] == []
+    assert wk9["flex"]["line"] == "flex: 2 eligible players left across RB/WR/TE"  # RB 0 + WR 1 + TE 1 beyond own slots
     assert wk9["starters_out"] == ["R1 (RB)"] and wk9["eligible_active"]["WR"] == 3
 
 
@@ -970,3 +976,153 @@ async def test_the_running_team_error_sets_the_band_for_the_gap_and_the_matchup(
     r = await build(compare=fake_compare(14.0), running_team_error=40.0)       # band 20: a 14 point gap is noise
     assert r["roster"]["gap_is_noise"] and r["roster"]["noise_band"] == 20.0
     assert r["opponent"]["noise_band"] == 20.0
+
+
+# ------------------------------------------------------------------ follow-up 1: holes, K and DEF
+@pytest.mark.asyncio
+async def test_a_def_on_bye_with_no_other_def_gets_the_best_available_def_as_a_target(pages):
+    async def silent(**kw):
+        return {"success": True, "targets": [],
+                "message": "Nothing on waivers beats your current starters in week 8 (212 free agents checked)."}
+    r = await build(targets=silent)
+    assert [h["kind"] for h in r["wire"]["holes"]] == ["on bye"]
+    assert not [s for s in r["roster"]["slots"] if s["position"] == "DEF" and s["slot"] == "BN"]   # no other DEF
+    best = r["wire"]["positions"]["DEF"][0]
+    t = r["wire"]["targets"][0]
+    assert t["position"] == "DEF" and t["player_id"] == best["player_id"] and t["name"] == best["name"]
+    assert t["tag"] == t["yahoo_tag"] == best["tag"] and t["tag"].startswith("W (")
+    assert t["projected_points"] == best["our_projection"] and t["upgrade_points"] == best["our_projection"]
+    assert t["verdict"] == "fills_hole" and "Texans (HOU DEF) is on bye" in t["fills"]
+    note = r["wire"]["targets_note"]
+    assert "beats your current starters" not in note and "Texans (HOU DEF) is on bye" in note
+
+
+@pytest.mark.asyncio
+async def test_an_empty_k_slot_reads_the_k_wire_and_targets_the_best_kicker(pages, monkeypatch):
+    prov = await runtime.get_provider(LG)
+    real_roster, real_players = prov.data.roster, prov.data.players
+
+    async def roster(mid):
+        return [{**sl, "name": None, "team": None, "position": None, "injury": None, "yahoo_id": None,
+                 "projected": None, "bye": None, "game": None, "empty": True} if sl["slot"] == "K" else sl
+                for sl in await real_roster(mid)]
+    kickers = [{"yahoo_id": None, "name": n, "team": tm, "position": "K", "injury": None, "game": None,
+                "availability": {"state": "FA", "clears": None, "owner": None}}
+               for n, tm in (("Kai Kicker", "BUF"), ("Lee Leg", "DAL"), ("Moe Boot", "MIA"))]
+
+    async def players(pos, status):
+        return kickers if pos == "K" else await real_players(pos, status)
+    monkeypatch.setattr(prov.data, "roster", roster)
+    monkeypatch.setattr(prov.data, "players", players)
+    r = await build()
+    assert "K" in r["wire"]["positions"] and "K" in r["wire"]["reasons"]
+    assert any(p["type"] == "empty_starting_slot" and p["slot"] == "K" for p in r["problems"])
+    assert {h["kind"] for h in r["wire"]["holes"]} == {"empty", "on bye"}
+    k = next(t for t in r["wire"]["targets"] if t["position"] == "K")
+    assert k["name"] == "Kai Kicker" and k["tag"] == "FA" and k["projected_points"] == 9.0   # first = best projected
+    assert "No player in the K starting slot" in k["fills"]
+    assert k["upgrade_points"] == 9.0                                 # an empty slot is worth the whole projection
+    assert next(w for w in r["wire"]["positions"]["K"])["upgrade_over"] == "No player in the K starting slot"
+    assert "beats your current starters" not in r["wire"]["targets_note"]
+
+
+def test_a_hole_is_a_zero_baseline_whether_the_starter_is_on_bye_out_or_missing():
+    starters = [_starter("K", "K", 8.0), _starter("RB", "RB", 15.0)]
+    empty = [{"slot": "K", "kind": "empty", "positions": ["K"], "reason": "No player in the K starting slot",
+              "player": None}]
+    assert checkin._baseline("K", starters, empty) == (0.0, "No player in the K starting slot")
+    assert checkin._baseline("RB", starters, empty)[0] == 15.0                 # a K hole says nothing about RB
+    flex = [{"slot": "FLEX", "kind": "empty", "positions": ["RB", "WR", "TE"], "reason": "x", "player": None}]
+    assert all(checkin._baseline(p, starters, flex)[0] == 0.0 for p in ("RB", "WR", "TE"))
+    holes = checkin.starter_holes(
+        [S("K", empty=True), S("W/R/T", empty=True)],
+        [{**_starter("RB", "RB", 15.0), "on_bye": True, "slot": "RB", "name": "Ann"},
+         {**_starter("WR", "WR", 9.0), "injury": "O", "slot": "WR", "name": "Bo"},
+         {**_starter("BN", "RB", 1.0), "on_bye": True, "slot": "BN", "name": "Bench"},
+         {**_starter("QB", "QB", 0.0), "slot": "QB", "name": "Cy", "nfl_injury_status": "Out",
+          "injury_flags": ["injury_conflict"]}])
+    assert [(h["slot"], h["kind"]) for h in holes] == [("K", "empty"), ("FLEX", "empty"), ("RB", "on bye"), ("WR", "out")]
+    assert holes[1]["positions"] == ["RB", "WR", "TE"] and holes[2]["reason"] == "Ann (RB) is on bye"
+
+
+def test_holes_are_filled_by_the_best_wire_player_who_can_play_the_slot_once_each():
+    wire = {"positions": {"WR": [
+        {"name": "Rex Runner", "label": "Rex Runner (TEN RB)", "team": "TEN", "position": "RB", "player_id": "1",
+         "tag": "FA", "our_projection": 12.0},          # read on the WR page, but he is an RB
+        {"name": "Wes Wide", "label": "Wes Wide (KC WR)", "team": "KC", "position": "WR", "player_id": "2",
+         "tag": "W (Oct 31)", "our_projection": 9.0}]}}
+    holes = [{"slot": "WR", "kind": "out", "positions": ["WR"], "reason": "Ann (WR) is out", "player": "Ann (WR)"},
+             {"slot": "FLEX", "kind": "empty", "positions": ["RB", "WR", "TE"], "reason": "flex empty", "player": None},
+             {"slot": "K", "kind": "empty", "positions": ["K"], "reason": "k empty", "player": None}]
+    got, notes = checkin.hole_targets(holes, wire)
+    assert [t["name"] for t in got] == ["Wes Wide", "Rex Runner"]                # the WR slot cannot take the RB
+    assert [t["tag"] for t in got] == ["W (Oct 31)", "FA"]
+    assert notes == ["no Yahoo free agent was read for the K hole (k empty)"]
+
+
+# ------------------------------------------------------------------ follow-up 2: thin flags
+def test_te_and_wr_are_not_thin_because_of_the_flex_and_the_flex_is_its_own_line():
+    slots = [S("QB", "Q1", "QB"), S("RB", "R1", "RB"), S("RB", "R2", "RB"), S("WR", "W1", "WR"), S("WR", "W2", "WR"),
+             S("TE", "T1", "TE"), S("W/R/T", "R3", "RB"), S("K", "K1", "K"), S("DEF", "D1", "DEF")]
+    out = {w["week"]: w for w in checkin.bye_outlook(slots, 8, 4)}
+    assert out[8]["thin_positions"] == [] and out[8]["flex"]["eligible_left"] == 1      # R3 is the only extra body
+    assert out[8]["flex"]["line"] == "flex: 1 eligible players left across RB/WR/TE"
+    assert sum(out[8]["slots_to_fill"].values()) == 9
+    slots2 = slots + [S("BN", "T2", "TE", bye=9)]
+    wk9 = {w["week"]: w for w in checkin.bye_outlook(slots2, 8, 4)}[9]
+    assert wk9["eligible_active"]["TE"] == 1 and "TE" not in wk9["thin_positions"]      # TE 1 slot, 1 body: not thin
+    assert wk9["eligible_active"]["WR"] == 2 and "WR" not in wk9["thin_positions"]
+    assert wk9["flags"] == []
+
+
+def test_a_position_below_its_own_slot_count_is_thin_and_a_short_flex_is_a_separate_flag():
+    slots = [S("QB", "Q1", "QB"), S("RB", "R1", "RB"), S("RB", "R2", "RB", bye=9), S("WR", "W1", "WR"),
+             S("WR", "W2", "WR"), S("TE", "T1", "TE", bye=9), S("W/R/T", "R3", "RB"), S("K", "K1", "K"),
+             S("DEF", "D1", "DEF")]
+    wk9 = {w["week"]: w for w in checkin.bye_outlook(slots, 8, 4)}[9]
+    assert wk9["thin_positions"] == ["TE"] and wk9["short_positions"] == ["TE"]      # RB: R1 + R3 still fill 2 slots
+    assert "thin at TE: 0 active for 1 slots to fill" in wk9["flags"]
+    assert wk9["flex"]["eligible_left"] == 0
+    assert "flex: 0 eligible players left across RB/WR/TE, for 1 flex slot(s)" in wk9["flags"]
+    assert not any(f.startswith("thin at RB") or f.startswith("thin at WR") for f in wk9["flags"])
+    assert checkin.wire_positions([], [wk9]) == ["RB", "TE"]   # two starters on bye (RB, TE); TE is also short
+
+
+# ------------------------------------------------------------------ follow-up 3: vs_bench eligibility and wording
+def _wr(name, pos, mine, tag="FA"):
+    return {"name": name, "label": f"{name} (X {pos})", "team": "X", "position": pos, "tag": tag, "our_projection": mine}
+
+
+def test_a_wr_slot_is_replaced_by_wr_only_even_when_the_best_wire_player_is_an_rb():
+    players = [B("WR", "Una Starter", "WR", 12.0, 11, injury="Q"), B("WR", "Zed Steady", "WR", 14.0, 5),
+               B("BN", "Vic Bench", "WR", 10.4, 6), B("BN", "Rob Back", "RB", 13.0, 6)]
+    wire = {"positions": {"WR": [_wr("Rex Runner", "RB", 14.0), _wr("Wes Wide", "WR", 10.6)]}}
+    row = checkin.bench_vs_wire(players, wire, 8)[0]
+    assert row["slot"] == "WR" and row["eligible_positions"] == ["WR"]
+    assert row["best_bench"]["player"] == "Vic Bench (X WR)"                    # the 13.0 RB is not eligible
+    assert row["best_wire"]["player"] == "Wes Wide (X WR)"                      # nor the 14.0 RB on the wire
+    assert row["decision"].startswith("no add needed, use Vic Bench (X WR)") and "Rex Runner" not in str(row)
+    only_rb = checkin.bench_vs_wire(players, {"positions": {"WR": [_wr("Rex Runner", "RB", 14.0)]}}, 8)[0]
+    assert only_rb["best_wire"] is None and only_rb["decision"] == "no add needed, use Vic Bench (X WR)"
+
+
+def test_the_flex_slot_takes_an_rb_wr_or_te_from_the_bench_and_the_wire():
+    players = [B("W/R/T", "Fay Flex", "WR", 9.0, 11, injury="Q"), B("WR", "Zed Steady", "WR", 14.0, 5),
+               B("BN", "Vic Bench", "WR", 6.0, 6), B("BN", "Rob Back", "RB", 10.5, 6), B("BN", "Tim Tight", "TE", 7.0, 6)]
+    wire = {"positions": {"RB": [_wr("Rex Runner", "RB", 11.0)], "WR": [_wr("Wes Wide", "WR", 8.0)]}}
+    row = checkin.bench_vs_wire(players, wire, 8)[0]
+    assert row["slot"] == "FLEX" and row["eligible_positions"] == ["RB", "WR", "TE"]
+    assert row["best_bench"]["player"] == "Rob Back (X RB)" and row["best_wire"]["player"] == "Rex Runner (X RB)"
+    assert row["gap"] == 0.5 and row["decision"].startswith("no add needed, use Rob Back (X RB)")
+    assert "a tie inside the 1.5-point tie band" in row["decision"]
+    assert [b["player"] for b in row["bench_replacements"]] == ["Rob Back (X RB)"]   # 10.5 >= the 9.0 starter
+
+
+def test_a_worse_wire_player_is_said_to_be_worse_by_more_than_the_tie_band():
+    players = [B("WR", "Una Starter", "WR", 12.0, 11, injury="Q"), B("BN", "Vic Bench", "WR", 10.4, 6)]
+    row = checkin.bench_vs_wire(players, {"positions": {"WR": [_wr("Wes Wide", "WR", 7.8)]}}, 8)[0]
+    assert row["gap"] == -2.6
+    assert ("worse than Vic Bench (X WR) by 2.6 (more than the 1.5-point tie band)" in row["decision"])
+    assert "under the" not in row["decision"] and row["decision"].startswith("no add needed, use Vic Bench (X WR)")
+    row = checkin.bench_vs_wire(players, {"positions": {"WR": [_wr("Wes Wide", "WR", 9.6)]}}, 8)[0]
+    assert "worse than" not in row["decision"] and "a tie inside the 1.5-point tie band" in row["decision"]
