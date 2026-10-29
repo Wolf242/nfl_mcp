@@ -37,7 +37,11 @@ NOISE_BAND_POINTS = 12.0
 NOISE_FLOOR_POINTS = 10.0
 # Two single players closer than this are a tie: the projections cannot tell them apart.
 PLAYER_TIE_POINTS = 1.5
-STALE_INJURY_DAYS = 2  # a stored injury report older than this is not current
+STALE_INJURY_DAYS = 3  # a stored injury report older than this (or from before this NFL week) is not current
+EDGE_BAND_POINTS = 1.0  # a margin this close to the noise band is "at the edge" of it
+EASY_REPLACEMENT_COUNT = 3  # this many free agents projecting above a backup make him easy to replace
+# Statuses that last for weeks or the season: they say nothing about this week's game.
+SEASON_LONG_TAGS = {"IR", "PUP-R", "NFI-R"}
 READ_ONLY_NOTE = "Read-only: nothing was added, dropped, claimed, traded or changed on Yahoo."
 
 # nfl_mcp's injury wording -> Yahoo's tag letters.
@@ -229,25 +233,54 @@ def _same_tag(a: str | None, b: str | None) -> bool:
     return a == b or (a in RESERVE_TAGS and b in RESERVE_TAGS)
 
 
-def _age_days(stamp: str | None, now: datetime) -> float | None:
-    """Days since an ISO timestamp, or None when it is missing or unreadable."""
+def _when(stamp: str | None) -> datetime | None:
+    """An ISO date or timestamp as an aware datetime, or None when it is missing or unreadable."""
     if not stamp:
         return None
     try:
         when = datetime.fromisoformat(str(stamp).strip().replace("Z", "+00:00"))
     except ValueError:
         return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    return (now - when).total_seconds() / 86400.0
+    return when if when.tzinfo else when.replace(tzinfo=UTC)
 
 
-def injury_flags(p: dict, refresh_stale: bool = False, now: datetime | None = None) -> list[str]:
+def injury_record_date(p: dict) -> tuple[str | None, str | None]:
+    """The date of nfl_mcp's stored injury record and where it came from: the source's own report
+    date, else the time nfl_mcp stored it (which says nothing about when the report was written)."""
+    if p.get("nfl_injury_report_date"):
+        return p["nfl_injury_report_date"], "report date"
+    if p.get("nfl_injury_stored_at"):
+        return p["nfl_injury_stored_at"], "stored-at time (the source gave no report date)"
+    return None, None
+
+
+def stale_reasons(p: dict, refresh_stale: bool = False, now: datetime | None = None,
+                  week_start: date | None = None) -> list[str]:
+    """Why the stored injury record cannot be trusted as current: the refresh timed out, the record is
+    more than :data:`STALE_INJURY_DAYS` days old, or it is dated before this NFL week started. The
+    date rules apply even when the refresh succeeded."""
+    reasons = ["the injury refresh timed out"] if refresh_stale else []
+    stamp, _ = injury_record_date(p)
+    when = _when(stamp)
+    if when is not None:
+        age = ((now or datetime.now(UTC)) - when).total_seconds() / 86400.0
+        if age > STALE_INJURY_DAYS:
+            reasons.append(f"dated {stamp[:10]}, {age:.0f} days old (limit {STALE_INJURY_DAYS})")
+        if week_start is not None and when.date() < week_start:
+            reasons.append(f"dated {stamp[:10]}, before this NFL week started ({week_start.isoformat()})")
+    return reasons
+
+
+def injury_flags(p: dict, refresh_stale: bool = False, now: datetime | None = None,
+                 week_start: date | None = None) -> list[str]:
     """Why a player's injury data must not drive a decision on its own.
 
-    ``stale_injury``: nfl_mcp's refresh timed out, or its report is older than two days.
-    ``injury_conflict``: Yahoo's tag and nfl_mcp's designation differ.
-    ``yahoo_only``: Yahoo shows a tag and nfl_mcp has no report at all.
+    ``stale_injury``: the refresh timed out, or the record is more than three days old or from before
+    this NFL week. ``injury_conflict``: Yahoo's tag and nfl_mcp's designation differ. ``yahoo_only``:
+    Yahoo shows a tag and nfl_mcp has no report at all. ``season_long_status``: nfl_mcp has a PUP, NFI
+    or IR record that Yahoo does not show. ``predates_activation``: nfl_mcp has a record but Yahoo
+    shows the player active, and the record is season-long or old, so it was written before he came
+    back. Neither of the last two can make a player Out or project 0.
     """
     y, status = p.get("injury"), p.get("nfl_injury_status")
     if not (y or status):
@@ -258,10 +291,33 @@ def injury_flags(p: dict, refresh_stale: bool = False, now: datetime | None = No
         flags.append("yahoo_only")
     if y and n and not _same_tag(y, n):
         flags.append("injury_conflict")
-    age = _age_days(p.get("nfl_injury_reported_at"), now or datetime.now(UTC))
-    if refresh_stale or (age is not None and age > STALE_INJURY_DAYS):
+    reasons = stale_reasons(p, refresh_stale, now, week_start)
+    if reasons:
         flags.append("stale_injury")
+    if n in SEASON_LONG_TAGS and y not in RESERVE_TAGS:
+        flags.append("season_long_status")
+    dated = [r for r in reasons if not r.startswith("the injury refresh")]
+    if status and not y and p.get("slot") != "IR" and (n in SEASON_LONG_TAGS or dated):
+        flags.append("predates_activation")
     return flags
+
+
+def injury_statement(p: dict, reasons: list[str]) -> str:
+    """How the record may be quoted: with its date, and as a stored report (not as fact) when stale."""
+    status, y = p.get("nfl_injury_status"), p.get("injury")
+    if not status:
+        return f"Yahoo alone shows {y}; nfl_mcp has no report" if y else "no injury data"
+    bits = [status]
+    if p.get("practice_status"):
+        bits.append(f"practice {p['practice_status']}"
+                    + (f" (dated {str(p['nfl_practice_date'])[:10]})" if p.get("nfl_practice_date") else ""))
+    if p.get("nfl_injury_body_part"):
+        bits.append(p["nfl_injury_body_part"])
+    stamp, _ = injury_record_date(p)
+    when = f"dated {stamp[:10]}" if stamp else "undated"
+    if reasons:
+        return f"stored report ({when}, stale: {'; '.join(reasons)}) says {', '.join(bits)}"
+    return f"nfl_mcp report ({when}) says {', '.join(bits)}"
 
 
 def projection_unknown(p: dict) -> str | None:
@@ -269,12 +325,19 @@ def projection_unknown(p: dict) -> str | None:
 
     nfl_mcp prices an Out designation as 0. When that designation is stale, in conflict with
     Yahoo's tag, or only Yahoo's, the 0 is a guess about availability and not a measure of the
-    player, so it is not used to rank him.
+    player, so it is not used to rank him. A PUP, NFI or IR record that Yahoo does not show, or one
+    that predates the player's activation, never makes him Out either.
     """
     flags = p.get("injury_flags") or []
-    if flags and nfl_tag(p.get("nfl_injury_status")) == "O" and p.get("our_projection") in (0, 0.0):
+    if not flags or p.get("our_projection") not in (0, 0.0):
+        return None
+    n = nfl_tag(p.get("nfl_injury_status"))
+    if n == "O":
         return ("projection of 0 comes from an Out designation that is "
                 + " / ".join(f.replace("_", " ") for f in flags) + "; check the team report")
+    if n in SEASON_LONG_TAGS and {"season_long_status", "predates_activation"} & set(flags):
+        return (f"projection of 0 comes from a {p.get('nfl_injury_status')} record that Yahoo does not show "
+                "(a season-long status, or a record that predates his activation); it never makes a player Out")
     return None
 
 
@@ -292,7 +355,7 @@ def _same_text(a: str | None, b: str | None) -> bool:
 
 def verify_roster(players: list[dict], week: int, schedules: dict[int, dict | None],
                   weeks: int = BYE_WEEKS_AHEAD, refresh_stale: bool = False,
-                  now: datetime | None = None) -> dict:
+                  now: datetime | None = None, week_start: date | None = None) -> dict:
     """Cross-check Yahoo's injury tags and bye weeks against nfl_mcp's own data.
 
     ``players`` are comparison rows (Yahoo tag and bye week, plus nfl_mcp's injury status and
@@ -344,13 +407,18 @@ def verify_roster(players: list[dict], week: int, schedules: dict[int, dict | No
                 bits.append("differs: " + ", ".join(differ))
             if missing and verdict == "partial":
                 bits.append("not compared, missing: " + ", ".join(missing))
-            injuries.append({"name": p["name"], "label": label_of(p), "slot": p["slot"], "yahoo_tag": y,
-                             "nfl_mcp_status": p.get("nfl_injury_status"), "practice": p.get("practice_status"),
+            reasons = stale_reasons(p, refresh_stale, now, week_start) if p.get("nfl_injury_status") else []
+            stamp, basis = injury_record_date(p)
+            injuries.append({"key": p.get("key"), "name": p["name"], "label": label_of(p), "slot": p["slot"],
+                             "yahoo_tag": y, "nfl_mcp_status": p.get("nfl_injury_status"),
+                             "practice": p.get("practice_status"), "practice_date": p.get("nfl_practice_date"),
                              "body_part": p.get("nfl_injury_body_part"),
-                             "reported_at": p.get("nfl_injury_reported_at"),
+                             "report_date": p.get("nfl_injury_report_date"), "stored_at": p.get("nfl_injury_stored_at"),
+                             "date_used": stamp, "date_basis": basis, "stale_reasons": reasons,
                              "gameday": p.get("gameday_status"), "verdict": verdict,
                              "fields_differ": differ, "fields_missing": missing,
-                             "flags": injury_flags(p, refresh_stale, now), "detail": "; ".join(bits)})
+                             "flags": injury_flags(p, refresh_stale, now, week_start),
+                             "statement": injury_statement(p, reasons), "detail": "; ".join(bits)})
         team = normalize_team(p.get("team"))
         yb = p.get("bye_week")
         if p["slot"] == "IR" or not team:
@@ -393,9 +461,11 @@ def verification_warnings(verify: dict) -> list[str]:
             out.append(f"Injury tag conflict for {who}: {r['detail']}. Check the team report before deciding.")
         elif r["verdict"] == "other_only":
             out.append(f"{who}: nfl_mcp has an injury report ({r['nfl_mcp_status']}) but Yahoo shows no tag.")
-        if "stale_injury" in r.get("flags", []):
-            out.append(f"{who}: injury data is stale (the refresh timed out or the report is more than "
-                       f"{STALE_INJURY_DAYS} days old); do not act on it alone.")
+        if "predates_activation" in r.get("flags", []) or "season_long_status" in r.get("flags", []):
+            out.append(f"{who}: the {r['statement']}. That is a season-long status or a record older than his "
+                       "activation, so it is ignored: it creates no Out and no 0 projection.")
+        elif "stale_injury" in r.get("flags", []):
+            out.append(f"{who}: injury data is stale: the {r['statement']}. Do not act on it alone.")
     for r in verify["byes"]:
         if r["verdict"] == "conflict":
             out.append(f"Bye conflict for {r.get('label') or r['name']}: {r['detail']}")
@@ -437,13 +507,25 @@ def _in_window(bye: int | None, week: int) -> bool:
     return bye is not None and week <= bye < week + BYE_WEEKS_AHEAD
 
 
-def bench_review(players: list[dict], week: int) -> dict:
+def single_starter_positions(players: list[dict]) -> set[str]:
+    """Positions with exactly one starting slot of their own (QB, TE, K and DEF in a standard lineup):
+    when that one starter is hurt there is nobody else to play."""
+    counts: dict[str, int] = {}
+    for p in players:
+        if p["slot"] not in STARTER_EXCLUDED and p["slot"] not in FLEX_POSITIONS and p.get("name"):
+            counts[p["slot"]] = counts.get(p["slot"], 0) + 1
+    return {pos for pos, n in counts.items() if n == 1}
+
+
+def bench_review(players: list[dict], week: int, replacement: dict[str, dict] | None = None) -> dict:
     """Rank the bench by what each player is for, not by this week's projection.
 
     A bench spot has to do one of two jobs: insurance (he can fill in for a starter at his position
-    whose bye falls in the next four weeks, or who is hurt now) or a believable path to a bigger
-    role (he projects within a tie of the weakest starter at his position, or his role is rising).
-    The drop is whoever does neither. A player whose projection is an unreliable zero (an Out
+    whose bye falls in the next four weeks, or who is hurt now; at a position with a single starter,
+    any backup is injury insurance for him) or a believable path to a bigger role (he projects within
+    a tie of the weakest starter at his position, or his role is rising). The drop is whoever does
+    neither. ``replacement`` (see :func:`replaceability`) says how many free agents project above a
+    backup: insurance that is easy to replace ranks as a drop before insurance that is not. A player whose projection is an unreliable zero (an Out
     designation that is stale, contested or Yahoo-only) is not ranked: he is listed as unknown with
     the reason. Returns ``{"ranked": [...], "unknown": [...]}``, ranked least useful first.
     """
@@ -459,9 +541,17 @@ def bench_review(players: list[dict], week: int) -> dict:
         rows = [(s, v) for s, v in rows if v is not None]
         return min(rows, key=lambda r: r[1]) if rows else None
 
+    single = single_starter_positions(players)
     ranked, unknown = [], []
     covered_by: dict[str, list[str]] = {}
     jobs: dict[str, list[str]] = {}
+    kinds_of: dict[str, list[str]] = {}
+
+    def cover(starter: dict, backup: dict) -> None:
+        who = covered_by.setdefault(starter.get("key") or player_key(starter), [])
+        if (backup.get("key") or player_key(backup)) not in who:
+            who.append(backup.get("key") or player_key(backup))
+
     for b_ in bench:
         why = projection_unknown(b_)
         if why:
@@ -471,6 +561,7 @@ def bench_review(players: list[dict], week: int) -> dict:
                             "note": "not ranked: his projection is unknown, not zero"})
             continue
         mine: list[str] = []
+        kinds: list[str] = []
         if b_.get("injury") not in UNAVAILABLE_TAGS:
             for st in starters:
                 if st["position"] != b_["position"] or not st.get("name"):
@@ -478,10 +569,16 @@ def bench_review(players: list[dict], week: int) -> dict:
                 sb = _week_of(st.get("bye_week"))
                 if _in_window(sb, week) and _week_of(b_.get("bye_week")) != sb:
                     mine.append(f"covers the week {sb} bye of {label_of(st)}")
-                    covered_by.setdefault(st.get("key") or player_key(st), []).append(b_.get("key") or player_key(b_))
+                    kinds.append("bye")
+                    cover(st, b_)
                 elif st.get("injury") in ("Q", "D", "O") and not b_.get("on_bye"):
                     mine.append(f"covers {label_of(st)}, who is tagged {st['injury']}")
-                    covered_by.setdefault(st.get("key") or player_key(st), []).append(b_.get("key") or player_key(b_))
+                    kinds.append("injury")
+                    cover(st, b_)
+                if b_["position"] in single and st["slot"] == b_["position"]:
+                    mine.append(f"injury insurance: the only {b_['position']} starter is {label_of(st)}")
+                    kinds.append("single")
+                    cover(st, b_)
         path = None
         proj = usable_projection(b_) if not b_.get("on_bye") else None
         low = weakest(b_["position"])
@@ -491,6 +588,7 @@ def bench_review(players: list[dict], week: int) -> dict:
             path = (f"projects {proj:.1f}, within {PLAYER_TIE_POINTS:g} of {label_of(low[0])} "
                     f"({low[1]:.1f}), the weakest starter at {b_['position']}")
         jobs[b_.get("key") or player_key(b_)] = mine
+        kinds_of[b_.get("key") or player_key(b_)] = kinds
         ranked.append({"b": b_, "covers": mine, "path": path, "proj": proj})
 
     rows = []
@@ -499,8 +597,10 @@ def bench_review(players: list[dict], week: int) -> dict:
         key = b_.get("key") or player_key(b_)
         mine_keys = [st for st, who in covered_by.items() if key in who]
         redundant = bool(r["covers"]) and all(len(set(covered_by[k])) > 1 for k in mine_keys)
-        tier = 0 if not r["covers"] and not r["path"] else 1 if r["covers"] and redundant and not r["path"] else \
-            2 if not r["covers"] else 3
+        rep_info = (replacement or {}).get(key)
+        cheap = bool(rep_info and rep_info.get("easy") and set(kinds_of[key]) == {"single"} and not r["path"])
+        tier = 0 if not r["covers"] and not r["path"] else 1 if r["covers"] and (redundant or cheap) and not r["path"] \
+            else 2 if not r["covers"] else 3
         if b_.get("on_bye"):
             lead = "on bye this week (no projection); "
         else:
@@ -510,14 +610,18 @@ def bench_review(players: list[dict], week: int) -> dict:
                     f"{BYE_WEEKS_AHEAD} weeks and has no path to a bigger role")
         else:
             bits = list(r["covers"]) + ([f"path: {r['path']}"] if r["path"] else [])
-            note = lead + "; ".join(bits) + ("; another bench player covers the same starter" if tier == 1 else "")
+            note = lead + "; ".join(bits) + ("; another bench player covers the same starter" if redundant and tier == 1
+                                             else "")
+        if rep_info:
+            note += ("; easy to replace: " if rep_info["easy"] else "; hard to replace: ") + rep_info["text"]
         rows.append({
             "key": key, "name": b_["name"], "label": label_of(b_), "position": b_["position"], "team": b_["team"],
             "player_id": b_.get("player_id"), "this_week": r["proj"], "on_bye": b_["on_bye"],
             "bye_week": b_.get("bye_week"), "injury": b_.get("injury"), "injury_flags": b_.get("injury_flags") or [],
             "players_at_position": depth.get(b_["position"], 0),
-            "insurance_for": r["covers"], "path_to_role": r["path"], "does_a_job": tier > 0,
-            "redundant_cover": tier == 1, "note": note,
+            "insurance_for": r["covers"], "insurance_kinds": kinds_of[key], "path_to_role": r["path"],
+            "replacement": rep_info, "does_a_job": tier > 0,
+            "redundant_cover": redundant and tier == 1, "note": note,
             "_tier": tier,
         })
     rows.sort(key=lambda x: (x["_tier"], x["on_bye"], x["this_week"] is None, x["this_week"] or 0.0))
@@ -752,7 +856,10 @@ def matchup_read(margin: float | None, band: float) -> str | None:
     """How to read a projected margin: only outside the noise band is it a good (or tough) matchup."""
     if margin is None:
         return None
-    if abs(margin) <= band:
+    if abs(abs(margin) - band) <= EDGE_BAND_POINTS + 1e-9:
+        return (f"at the edge of the noise band (margin {margin:+.1f} against a +/-{band:g} band): "
+                "too close to call either way")
+    if abs(margin) < band:
         return f"inside the noise band (margin {margin:+.1f}, band +/-{band:g}): treat it as a toss-up"
     if margin > 0:
         return f"good matchup: projected ahead by {margin:.1f}, outside the +/-{band:g} noise band"
@@ -851,6 +958,149 @@ def news_origins(items: list[dict], labels_by_name: dict[str, list[str]]) -> dic
     return {"by_player": by_player, "origins": origins, "independent_origins": len(origins)}
 
 
+def _index_projections(res: dict | None) -> tuple[dict, dict]:
+    by_id: dict[str, dict] = {}
+    by_name: dict[str | None, list[dict]] = {}
+    for p in (res or {}).get("projections") or []:
+        if p.get("player_id") not in (None, ""):
+            by_id[str(p["player_id"])] = p
+        by_name.setdefault(p.get("player"), []).append(p)
+    return by_id, by_name
+
+
+def _find_projection(index: tuple[dict, dict], row: dict) -> dict | None:
+    by_id, by_name = index
+    if row.get("player_id") not in (None, "") and str(row["player_id"]) in by_id:
+        return by_id[str(row["player_id"])]
+    hits = by_name.get(row.get("name")) or []
+    return hits[0] if len(hits) == 1 else None
+
+
+async def replaceability(prov, project, league_id: str, week: int, players: list[dict],
+                         pages: dict[str, list[dict]], warnings: list[str]) -> dict[str, dict]:
+    """How easy each backup at a single-starter position (QB, TE, K, DEF) is to replace: how many of
+    the top free agents at his position project above him. A backup on bye is compared in the first
+    week after it (he has no number this week). Reads that position's free-agent list if the wire
+    has not (one more Yahoo page), and projects the backup with the top free agents in one call."""
+    out: dict[str, dict] = {}
+    for pos in sorted(single_starter_positions(players)):
+        bench = [b for b in players if b["slot"] == "BN" and b["position"] == pos and not projection_unknown(b)]
+        if not bench:
+            continue
+        try:
+            if pos not in pages:
+                pages[pos] = [_wire_row(p) for p in await prov.get_free_agents(pos)]
+        except Exception as e:
+            warnings.append(f"Could not read the {pos} free agents to judge how easy {pos} depth is to replace: {e}")
+            continue
+        fas = pages[pos][:WIRE_CANDIDATES]
+        for b in bench:
+            ref = week + 1 if b.get("on_bye") else week
+            ask = [{"name": x["name"], "team": x["team"], "position": x["position"], "player_id": x.get("player_id")}
+                   for x in [b, *fas]]
+            try:
+                index = _index_projections(await project(ask, league_id=league_id, week=ref))
+            except Exception as e:
+                warnings.append(f"Could not project {pos} free agents against {label_of(b)}: {e}")
+                continue
+            mine = _find_projection(index, b)
+            if not mine or mine.get("on_bye") or mine.get("projected_points") is None:
+                continue
+            bp = mine["projected_points"]
+            scored = []
+            for fa in fas:
+                pr = _find_projection(index, fa)
+                if pr and not pr.get("on_bye") and pr.get("projected_points") is not None:
+                    scored.append((pr["projected_points"], fa))
+            above = sorted((x for x in scored if x[0] > bp), key=lambda x: -x[0])
+            text = (f"{len(above)} of {len(scored)} free-agent {pos}s project above him ({bp:.1f}) in week {ref}"
+                    + (f"; the best is {above[0][1].get('label') or label_of(above[0][1])} "
+                       f"({above[0][0]:.1f}, {above[0][1]['tag']})" if above else ""))
+            out[b.get("key") or player_key(b)] = {
+                "week": ref, "bench_projection": bp, "free_agents_above": len(above),
+                "free_agents_checked": len(scored), "easy": len(above) >= EASY_REPLACEMENT_COUNT, "text": text}
+    return out
+
+
+_QUOTE = re.compile(r'["\u201c\u201d]')
+_SPEECH = re.compile(r"\b(said|says|told|asked|responded|stated|added|tweeted|insisted)\b", re.I)
+_PREDICT = re.compile(r"\b(guarantee[sd]?|predict(?:s|ed|ion|ions)?|will win|going to win|win this game|"
+                      r"picks? to win|bold prediction)\b", re.I)
+_AVAILABILITY = re.compile(
+    r"\b(questionable|doubtful|probable|injur\w*|practice\w*|limited|dnp|inactive|ruled|surgery|pup|"
+    r"designat\w*|activated|placed on|hamstring|knee|ankle|shoulder|concussion|illness|suspend\w*|"
+    r"(?:is|are|be|listed|declared)\s+out|return\w*\s+(?:to|from|this|next)|injured reserve)\b", re.I)
+
+
+def quote_or_prediction(text: str | None) -> str | None:
+    """Why a post is a player quote or a prediction ("guarantees a win") and not availability news,
+    else None. A post that carries injury or availability wording is kept either way."""
+    t = text or ""
+    if _AVAILABILITY.search(t):
+        return None
+    if _PREDICT.search(t):
+        return "prediction"
+    if _QUOTE.search(t) and _SPEECH.search(t):
+        return "player quote"
+    return None
+
+
+def attach_leads(injuries: list[dict], items: list[dict]) -> None:
+    """Prefer a fresher news lead to a stale stored record, labelled for what it is.
+
+    For each injury record that is stale, the newest post that names the player and is newer than the
+    record becomes the ``statement``: a lead from one account (single-source unless two independent
+    accounts carry it), not a confirmed status. The stored record's own wording is kept in
+    ``stored_statement``.
+    """
+    for r in injuries:
+        if not r.get("stale_reasons"):
+            continue
+        record = _when(r.get("date_used"))
+        best = None
+        for it in items:
+            posted = _when(it.get("posted_at"))
+            if r["label"] not in (it.get("mentions") or []) or posted is None:
+                continue
+            if record is not None and posted <= record:
+                continue
+            if best is None or posted > best[0]:
+                best = (posted, it)
+        if best is None:
+            continue
+        posted, it = best
+        text = re.sub(r"\s*(?:https?://)?(?:twitter|x)\.com/\S+", "", it.get("text") or "")
+        text = re.sub(r"^\s*\[[^\]]+\]\s*", "", text).strip()
+        text = text if len(text) <= 200 else text[:197] + "..."
+        origins = it.get("independent_origins", 1)
+        label = "single-source lead" if origins < 2 else f"lead from {origins} independent accounts"
+        relayed = f" relaying {it['relayed_reporter']}" if it.get("relayed_reporter") else ""
+        r["fresher_lead"] = {"author": it.get("author"), "relayed_reporter": it.get("relayed_reporter"),
+                             "posted_at": it.get("posted_at"), "text": text, "url": it.get("url"),
+                             "single_source": origins < 2, "independent_origins": origins}
+        r["stored_statement"] = r["statement"]
+        r["statement"] = (f"{label} from {it.get('author')}{relayed}, posted {it.get('posted_at', '')[:10]}: "
+                          f"\"{text}\". Unconfirmed; it is newer than the {r['stored_statement']}")
+
+
+def _refresh_warning(meta: dict) -> str:
+    """The injury refresh timeout, with each try's wait and the real error, not a generic message."""
+    text = ("nfl_mcp's injury refresh timed out, so the cross-check uses stored injury reports that may be "
+            "out of date")
+    attempts = meta.get("attempts") or []
+    if attempts:
+        text += ". " + "; ".join(
+            f"Try {i + 1}: waited {a['wait_seconds']:g} s, {a['outcome']}" + (f" ({a['error']})" if a.get("error") else "")
+            for i, a in enumerate(attempts))
+        text += f" ({meta.get('waited_seconds', 0):g} s in all"
+        text += f", {meta['teams']} teams" if meta.get("teams") else ""
+        text += ")"
+        if meta.get("background_running"):
+            text += (". The ESPN crawl is still running in the background and stores what it finds, so the next "
+                     "check-in should read fresh reports (a cold crawl of a full roster's teams can take minutes)")
+    return text + ". Every stored injury is flagged stale_injury."
+
+
 async def build_checkin(
     prov, league_id: str, mid: str, week: int, *,
     compare: Callable[..., Awaitable[dict]],
@@ -861,6 +1111,7 @@ async def build_checkin(
     refresh_injuries: Callable[[list[str]], Awaitable[tuple]] | None = None,
     today: date | None = None,
     now: datetime | None = None,
+    week_start: date | None = None,
     running_team_error: float | None = None,
     wire_depth: int = 6,
 ) -> dict:
@@ -903,8 +1154,7 @@ async def build_checkin(
             _, meta = await refresh_injuries(teams)
             if meta.get("partial"):
                 refresh_stale = True
-                warnings.append("nfl_mcp's injury refresh timed out, so the cross-check uses stored injury reports "
-                                "that may be out of date. Every injury below is flagged stale_injury.")
+                warnings.append(_refresh_warning(meta))
         except Exception as e:
             refresh_stale = True
             warnings.append(f"Could not refresh nfl_mcp's injury reports ({e}); injury tags may be unverified.")
@@ -912,7 +1162,10 @@ async def build_checkin(
     warnings += cmp.get("warnings") or []
     for p in cmp["players"]:
         p.setdefault("label", label_of(p))
-        p["injury_flags"] = injury_flags(p, refresh_stale, now)
+        p.setdefault("key", player_key(p))
+        p["injury_flags"] = injury_flags(p, refresh_stale, now, week_start)
+        p["injury_stale_reasons"] = (stale_reasons(p, refresh_stale, now, week_start)
+                                     if p.get("nfl_injury_status") else [])
         p["projection_unknown"] = projection_unknown(p)
         if p["projection_unknown"]:
             warnings.append(f"{p['label']}: {p['projection_unknown']}. He is not ranked on projection.")
@@ -1001,9 +1254,12 @@ async def build_checkin(
             "the best available Yahoo free agent for each is listed as a target"
             + (f"; {'; '.join(hole_notes)}" if hole_notes else "") + ".")
 
-    review = bench_review(cmp["players"], week)
+    replacement: dict[str, dict] = {}
+    if project is not None:
+        replacement = await replaceability(prov, project, league_id, week, cmp["players"], dict(wire_index), warnings)
+    review = bench_review(cmp["players"], week, replacement)
     drops, drop_unknown = review["ranked"], review["unknown"]
-    verify = verify_roster(cmp["players"], week, sched, refresh_stale=refresh_stale, now=now)
+    verify = verify_roster(cmp["players"], week, sched, refresh_stale=refresh_stale, now=now, week_start=week_start)
     warnings += verification_warnings(verify)
 
     opponent, opp_warn = None, []
@@ -1013,7 +1269,7 @@ async def build_checkin(
         opp_warn = [f"Could not read the matchup page: {e}"]
     warnings += opp_warn
 
-    news = {"items": [], "count": 0, "independent_origins": 0, "origins": [], "by_player": {}}
+    news = {"items": [], "count": 0, "dropped": [], "independent_origins": 0, "origins": [], "by_player": {}}
     if posts is not None:
         names = [s["name"] for s in slots if not s.get("empty") and s.get("name")]
         labels_by_name: dict[str, list[str]] = {}
@@ -1022,8 +1278,19 @@ async def build_checkin(
                 labels_by_name.setdefault(s["name"], []).append(label_of(s))
         try:
             res = await posts(None, 48, 40, names)
-            items = [dict(i, status="lead") for i in res.get("items", []) if i.get("mentions_watched_player")]
-            news = {"items": items, "count": len(items), **news_origins(items, labels_by_name)}
+            items, dropped = [], []
+            for i in res.get("items", []):
+                if not i.get("mentions_watched_player"):
+                    continue
+                why = quote_or_prediction(i.get("text"))
+                if why:
+                    dropped.append({"author": i.get("author"), "reason": why, "text": (i.get("text") or "")[:120]})
+                else:
+                    items.append(dict(i, status="lead"))
+            news = {"items": items, "count": len(items), "dropped": dropped, **news_origins(items, labels_by_name)}
+            if dropped:
+                warnings.append(f"Dropped {len(dropped)} news post(s) that are player quotes or predictions, not "
+                                "availability news, before counting leads.")
             if res.get("errors"):
                 warnings.append(f"{res['errors']} Bluesky handle(s) failed to load.")
             if items:
@@ -1037,6 +1304,11 @@ async def build_checkin(
         except Exception as e:
             warnings.append(f"News unavailable: {e}")
 
+    attach_leads(verify["injuries"], news["items"])
+    by_key = {r["key"]: r for r in verify["injuries"] if r.get("key")}
+    for p in cmp["players"]:
+        r = by_key.get(p.get("key"))
+        p["injury_statement"] = r["statement"] if r else None
     warnings.append("Yahoo's projections are a comparison source only. Injury tags and bye weeks are cross-checked "
                     "above where nfl_mcp has data; anything marked yahoo_only or unverified rests on Yahoo alone.")
     return {

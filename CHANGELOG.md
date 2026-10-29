@@ -109,6 +109,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   RB 2, WR 2, TE 1, K 1, DEF 1) with the flex as a separate line; `slots_to_fill` sums to 9.
   `wire.vs_bench` only compares players who can fill the flagged starter's slot, and says "worse
   than <bench player> by X (more than the 1.5-point tie band)" when the wire pickup is clearly worse.
+- **`fantasy_checkin` (Yahoo)**: first live run follow-ups. (1) The injury refresh timed out because
+  a cold crawl of 13 roster teams takes ~146 s (measured) against a 6 s wait, not because of the
+  network; it now retries once on the same background crawl with a longer wait
+  (`NFL_MCP_INJURY_RETRY_WAIT`, default 30 s) and the warning names each try's wait and the real
+  error. (2) Every injury record shows its report date; a record older than 3 days or from before
+  this NFL week is stale even when the refresh worked; a PUP/NFI/IR record Yahoo does not show, or
+  one older than the player's activation, never creates an Out or a 0 projection. (3) Each record
+  has a `statement` ("stored report (dated X, stale) says ..."); a fresher news lead replaces a
+  stale record, labelled single-source. (4) A margin within a point of the noise band is "at the
+  edge of the noise band". (5) A backup at a single-starter position counts as injury insurance,
+  with how many free agents project above him. (6) Player quotes and predictions are dropped
+  before leads are counted.
 
 - **`get_player_ownership`**: once a team's game this week has started, an unrostered
   player also gets `in_time_for_next_kickoff` / `next_kickoff_local` — a claim

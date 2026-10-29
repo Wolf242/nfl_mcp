@@ -196,7 +196,9 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
       (a target that cannot be mapped to a Yahoo player is dropped and named in warnings;
       targets_note says why the list is empty or which holes it fills)
     - drop_candidates: the bench ranked by a job test: insurance for a starter's bye or injury in
-      the next four weeks, or a path to a bigger role; the drop is whoever does neither.
+      the next four weeks (a backup at a single-starter position such as QB always counts, with how
+      many free agents project above him), or a path to a bigger role; the drop is whoever does
+      neither.
       drop_unknown lists bench players whose projection of 0 comes from an unverified Out
       designation (stale, conflicting or Yahoo-only): they are not ranked
     - opponent: projected points, margin and its reading (a "good matchup" only outside the
@@ -207,9 +209,14 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
     - verification: each injury tag and bye week checked against nfl_mcp's injury data and the NFL
       schedule: injuries agree (designation, practice and body part all match), partial (the
       differing or missing fields are named), conflict, yahoo_only or other_only; byes agree,
-      conflict or unverified. Players carry stale_injury / injury_conflict / yahoo_only flags
-    - news: reporter posts naming your players, each a lead; posts relayed by one aggregator
-      account count as one independent origin
+      conflict or unverified. Every injury record shows its report date; one older than 3 days or
+      from before this NFL week is stale even when the refresh worked. Players carry stale_injury /
+      injury_conflict / yahoo_only / season_long_status / predates_activation flags (a PUP, NFI or
+      IR record Yahoo does not show, or one older than the player's activation, never makes him Out).
+      Each has a statement to quote: "stored report (dated X, stale: ...) says ...", or, when a
+      newer post names him, a labelled single-source lead
+    - news: reporter posts naming your players, each a lead; player quotes and predictions are
+      dropped first, and posts relayed by one aggregator account count as one independent origin
     - warnings: anything single-source or unverified
     Every player is printed as "Full Name (TEAM POS)" and keyed internally on the player id.
     Yahoo's projections are shown for comparison only and never feed nfl_mcp's own.
@@ -235,7 +242,13 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
         return await ros.schedules_for(db, int(season), weeks)
 
     async def refresh_injuries(teams: list[str]):
-        return await injury_service.get_injury_reports_bounded(teams=teams, db=db)
+        # one retry with a longer wait; the real error and the waits go into the warning
+        return await injury_service.get_injury_reports_with_retry(teams=teams, db=db)
+
+    from datetime import UTC, datetime
+
+    from ..practice_reports import practice_week_start, to_eastern
+    week_start = practice_week_start(to_eastern(datetime.now(UTC)).date())
 
     async def project(players: list[dict], **kw) -> dict:
         return await projections.project_players(players, db=db, **kw)
@@ -244,7 +257,7 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
         await get_provider(league_id), league_id, mid, int(week), compare=compare_projections,
         project=project, targets=waiver_target_tools.get_waiver_targets,
         posts=news_social.get_insider_posts, schedules=schedules if season else None,
-        refresh_injuries=refresh_injuries)
+        refresh_injuries=refresh_injuries, week_start=week_start)
 
 
 @timing_decorator("verify_news_handles", tool_type="yahoo")

@@ -33,14 +33,24 @@ def _without_bye_players(warnings: list[str], bye_names: set[str]) -> list[str]:
 
 
 def _stored_report(db, name: str | None, team: str | None) -> dict:
-    """Body part and report time of nfl_mcp's stored injury report; empty when there is none."""
+    """What nfl_mcp's stored injury report says beyond the status: the body part, the date the source
+    dated the report (``report_date``), when nfl_mcp last stored it (``stored_at``, which is not the
+    report's date) and the date of the latest practice line. Empty when there is none."""
     try:
         rep = db.find_player_injury(name, team, max_age_hours=INJURY_LOOKUP_HOURS) if db is not None else None
     except Exception:
         rep = None
     if not isinstance(rep, dict):
         return {}
-    return {"body_part": rep.get("injury_type") or None, "reported_at": rep.get("updated_at") or rep.get("date_reported")}
+    out = {"body_part": rep.get("injury_type") or None, "report_date": rep.get("date_reported") or None,
+           "stored_at": rep.get("updated_at") or None, "practice_date": None}
+    try:
+        from ..practice_reports import lookup_practice
+        practice = lookup_practice(db, name, team)
+        out["practice_date"] = (practice or {}).get("latest_date")
+    except Exception:
+        pass
+    return out
 
 
 def _match_projection(r: dict, by_id: dict, by_name: dict) -> dict | None:
@@ -101,7 +111,8 @@ async def compare_projections(league_id: str, rows: list[dict], week: int | None
             "projection_source": "bye" if on_bye else p.get("projection_source"),
             "nfl_injury_status": p.get("injury_status"), "nfl_injury_source": p.get("injury_source"),
             "practice_status": p.get("practice_status"), "gameday_status": p.get("gameday_status"),
-            "nfl_injury_body_part": report.get("body_part"), "nfl_injury_reported_at": report.get("reported_at"),
+            "nfl_injury_body_part": report.get("body_part"), "nfl_injury_report_date": report.get("report_date"),
+            "nfl_injury_stored_at": report.get("stored_at"), "nfl_practice_date": report.get("practice_date"),
             "role_trend": p.get("role_trend"),
             "engine_bye_status": p.get("bye_status"),
             "gap": round(mine - theirs, 1) if mine is not None and theirs is not None else None,

@@ -16,12 +16,16 @@ top `get_waiver_targets` carrying Yahoo's own tag; `drop_candidates` (the bench 
 (projected points, margin and its reading, injured starters, byes); the next four weeks of byes (who is out, how many eligible
 players are left at each position against the slots to fill, and weeks with two or more starters on bye); reporter posts that
 name your players; and `warnings`. A team-level projection gap under 12 points is reported as noise, and a matchup is called
-"good" only when the margin is outside that band. Players on bye have no projection from anyone and show as on bye.
+"good" only when the margin is outside that band by more than a point (within a point of the band it is "at the edge of the noise band"). Players on bye have no projection from anyone and show as on bye.
 Every player is printed as `Full Name (TEAM POS)` and matched on the player id, never the surname.
 
 **Drops.** A bench spot has to do one of two jobs: insurance for a starter's bye or injury in the next four weeks (a TE2 covers
 the TE1's bye), or a believable path to a bigger role (projecting within 1.5 points of the weakest starter at his position, or a
-rising role). The drop is whoever does neither; a bye-week player is never "free to cut" if he covers a later bye.
+rising role). The drop is whoever does neither; a bye-week player is never "free to cut" if he covers a later bye. At a position with a single
+starter (QB, TE, K, DEF) any backup is injury insurance for him, and `replacement` says how easy he is to replace: how many of the top
+free agents at that position project above him (a backup on bye is compared in the first week after it, so a number is never quoted for
+his bye week). Insurance that is easy to replace (3 or more above him) ranks as a drop before insurance that is not; this reads one
+more Yahoo page for each such position the wire has not already read.
 `wire.vs_bench` compares each flagged starter's bench replacements with the best wire pickup first: inside the 1.5-point tie the
 answer is "no add needed, use <bench player>". A bench player whose projection of 0 comes from an Out designation that is stale,
 in conflict with Yahoo's tag, or Yahoo-only is not ranked: he is listed in `drop_unknown` with the reason.
@@ -54,6 +58,26 @@ report Yahoo does not show); each bye is `agree`, `conflict` or `unverified`. A 
 whose injury data is not to be trusted carry a flag: `stale_injury` (the refresh timed out or the stored report is more than two days
 old), `injury_conflict` or `yahoo_only`. News posts relayed by one aggregator account count as one independent origin. How much gets verified
 depends on what your server has cached: byes are checked against a schedule that is fetched if missing, and the check-in asks for fresh injury reports for your roster's teams first (bounded; on a timeout it uses what is stored and says so). Sleeper's injury status is one of nfl_mcp's injury sources, so a tag Sleeper contradicts shows as a `conflict`. Because nfl_mcp's projections now price those injury tags, a Q or D player's projection can sit well below Yahoo's.
+
+**Injury refresh, dates and stale records.** The check-in asks for fresh injury reports for your roster's teams first. That is
+a crawl of ESPN's athlete pages behind a rate limiter, not a single request: measured from a home PC, one team took about 1 second
+and the 13 teams of a full roster took about 146 seconds (the network was fine; the first wait of 6 seconds was simply shorter than
+the work). It now waits 6 seconds, then retries once waiting `NFL_MCP_INJURY_RETRY_WAIT` (default 30) seconds more on the same
+background crawl, so no second crawl is started. If it still has not finished, the warning names each try's wait, the real error
+and the total, and says the crawl keeps running and stores what it finds: the next check-in reads it (reports stay fresh for 2 hours
+Thursday to Monday, 12 hours otherwise, so the first check-in after a long gap is the one that times out).
+
+Every injury record shows its report date (`report_date`, as dated by the source; `stored_at` is only when nfl_mcp saved it and is
+used, and labelled, only when the source gave no date). A record is stale when it is older than 3 days or dated before the current
+NFL week started (the Tuesday), even if the refresh worked, or when the refresh timed out. Each record has a `statement` to quote:
+`nfl_mcp report (dated X) says ...` when current, `stored report (dated X, stale: ...) says ...` when not; a stale stored record is
+never stated as fact. When a newer post names the player, the statement becomes that post, labelled a single-source lead
+(`stored_statement` keeps the old wording). A season-long status (PUP, NFI, IR) that Yahoo does not show, or any stale record for a
+player Yahoo shows active, is flagged `season_long_status` / `predates_activation` and never makes a player Out or projects 0 in the
+check-in's rankings (the projection engine's own number is shown, and marked unknown, not rewritten).
+
+**News.** Posts that are player quotes or predictions ("guarantees a win") are dropped before leads are counted, unless they carry
+injury or availability wording; they are listed in `news.dropped`.
 
 No league or team id lives in the repo. Set them in your environment:
 

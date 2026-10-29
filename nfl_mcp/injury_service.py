@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import IntEnum
@@ -968,6 +970,10 @@ async def get_injury_reports(
 # get_injury_report.
 INJURY_CRAWL_WAIT_SECONDS = 6.0
 INJURY_CRAWL_INFLIGHT_WAIT_SECONDS = 1.0
+# The one retry's wait. A cold crawl of a 13-team roster measured 146 s on a home connection (the
+# ESPN athlete-detail requests, not the network), so this will not always cover it; the crawl keeps
+# running in the background either way and the next call reads what it stored.
+INJURY_RETRY_WAIT_SECONDS = float(os.getenv("NFL_MCP_INJURY_RETRY_WAIT", "30"))
 # The stored reports served meanwhile: anything newer than this.
 STORED_FALLBACK_MAX_AGE_HOURS = 24 * 14
 SOURCE_INJURY_CRAWL = "espn_injury_crawl"
@@ -988,8 +994,13 @@ def stored_injury_reports(db, teams: list[str] | None = None,
         return []
 
 
+def _crawl_key(teams: list[str] | None) -> str:
+    return "injury_reports:" + (",".join(sorted(teams)) if teams else "*")
+
+
 async def get_injury_reports_bounded(teams: list[str] | None = None, db=None,
-                                     wait: float = INJURY_CRAWL_WAIT_SECONDS
+                                     wait: float = INJURY_CRAWL_WAIT_SECONDS,
+                                     inflight_cap: float | None = INJURY_CRAWL_INFLIGHT_WAIT_SECONDS
                                      ) -> tuple[list[dict], dict]:
     """``(reports, meta)``: `get_injury_reports` (cached), but waiting at most
     ``wait`` seconds. On timeout the crawl keeps running in the background
@@ -998,11 +1009,11 @@ async def get_injury_reports_bounded(teams: list[str] | None = None, db=None,
     timed_out_sources: ["espn_injury_crawl"], stale: True}``."""
     from .upstream import inflight, single_flight, wait_bounded
 
-    key = "injury_reports:" + (",".join(sorted(teams)) if teams else "*")
-    if inflight(key):
+    key = _crawl_key(teams)
+    if inflight(key) and inflight_cap is not None:
         # An earlier call's crawl is still running: it will not be done in
         # a few seconds either.
-        wait = min(wait, INJURY_CRAWL_INFLIGHT_WAIT_SECONDS)
+        wait = min(wait, inflight_cap)
     task = single_flight(key, lambda: get_injury_reports(teams=teams, db=db, use_cache=True))
     done, rows = await wait_bounded(task, wait)
     if done:
@@ -1011,6 +1022,38 @@ async def get_injury_reports_bounded(teams: list[str] | None = None, db=None,
                    "serving stored reports")
     return stored_injury_reports(db, teams), {
         "partial": True, "timed_out_sources": [SOURCE_INJURY_CRAWL], "stale": True}
+
+
+async def get_injury_reports_with_retry(teams: list[str] | None = None, db=None,
+                                        wait: float = INJURY_CRAWL_WAIT_SECONDS,
+                                        retry_wait: float = INJURY_RETRY_WAIT_SECONDS
+                                        ) -> tuple[list[dict], dict]:
+    """`get_injury_reports_bounded`, tried once more with a longer wait when the first try times out
+    or raises. The crawl is single-flight, so the retry keeps waiting on the same background read
+    instead of starting another. ``meta`` adds ``attempts`` (each try's wait and outcome, with the
+    real error text), ``waited_seconds`` and, when it still did not finish, ``error`` and
+    ``background_running``."""
+    from .upstream import inflight
+
+    attempts: list[dict] = []
+    started = time.monotonic()
+    for i, w in enumerate((wait, retry_wait)):
+        try:
+            rows, meta = await get_injury_reports_bounded(
+                teams, db, wait=w, inflight_cap=INJURY_CRAWL_INFLIGHT_WAIT_SECONDS if i == 0 else None)
+        except Exception as e:  # the read itself failed: say what it said, then try once more
+            attempts.append({"wait_seconds": w, "outcome": "error", "error": f"{type(e).__name__}: {e}"})
+            continue
+        if not meta["partial"]:
+            attempts.append({"wait_seconds": w, "outcome": "ok", "error": None})
+            return rows, {**meta, "attempts": attempts, "waited_seconds": round(time.monotonic() - started, 1),
+                          "error": None}
+        attempts.append({"wait_seconds": w, "outcome": "timed out", "error": f"TimeoutError after {w:g} s"})
+    last = attempts[-1]
+    return stored_injury_reports(db, teams), {
+        "partial": True, "timed_out_sources": [SOURCE_INJURY_CRAWL], "stale": True,
+        "attempts": attempts, "waited_seconds": round(time.monotonic() - started, 1),
+        "error": last["error"], "background_running": inflight(_crawl_key(teams)), "teams": len(teams or [])}
 
 
 def parse_return_date(item: dict | None) -> str | None:

@@ -1,4 +1,5 @@
 """fantasy_checkin, the env defaults and the Yahoo block handling. Offline: fixtures and fakes only."""
+import asyncio
 import shutil
 import time
 from datetime import UTC, date, datetime
@@ -249,7 +250,7 @@ def tool_env(pages, monkeypatch):
     monkeypatch.setattr(compare, "compare_projections", fake_compare())
     monkeypatch.setattr(projections, "project_players", fake_project)
     monkeypatch.setattr(ros, "schedules_for", lambda db, season, weeks: fake_schedules(weeks))
-    monkeypatch.setattr(injury_service, "get_injury_reports_bounded", fake_refresh)
+    monkeypatch.setattr(injury_service, "get_injury_reports_with_retry", fake_refresh)
     monkeypatch.setattr(waiver_target_tools, "get_waiver_targets", fake_targets)
     monkeypatch.setattr(news_social, "get_insider_posts", fake_posts)
 
@@ -693,13 +694,13 @@ def B(slot, name, pos, mine, bye, team="X", injury=None, on_bye=False, **k):
 
 def test_a_bye_week_bench_player_who_covers_a_starters_bye_is_not_free_to_cut():
     players = [B("TE", "Tia Loveland", "TE", 10.0, 10), B("BN", "Kit Kittle", "TE", None, 8, on_bye=True),
-               B("QB", "Cal Cousins", "QB", 20.0, 13), B("BN", "Sam Shough", "QB", None, 8, on_bye=True)]
+               B("QB", "Cal Cousins", "QB", 20.0, 13), B("BN", "Sam Spare", "RB", None, 8, on_bye=True)]
     got = {d["name"]: d for d in checkin.drop_candidates(players, 8)}
-    kittle, shough = got["Kit Kittle"], got["Sam Shough"]
+    kittle, shough = got["Kit Kittle"], got["Sam Spare"]
     assert kittle["does_a_job"] and "covers the week 10 bye of Tia Loveland (X TE)" in kittle["note"]
     assert "free to cut" not in kittle["note"] and "costs nothing" not in kittle["note"]
     assert not shough["does_a_job"] and "does neither job" in shough["note"]
-    assert [d["name"] for d in checkin.drop_candidates(players, 8)][0] == "Sam Shough"
+    assert [d["name"] for d in checkin.drop_candidates(players, 8)][0] == "Sam Spare"
 
 
 def test_the_job_test_ranks_by_job_not_by_projection():
@@ -754,9 +755,9 @@ def test_injury_flags_cover_stale_conflict_and_yahoo_only():
     fresh = "2026-10-27T12:00:00+00:00"
     old = "2026-10-24T12:00:00+00:00"
     assert checkin.injury_flags({"injury": "Q", "nfl_injury_status": "Questionable",
-                                 "nfl_injury_reported_at": fresh}, now=NOW) == []
+                                 "nfl_injury_report_date": fresh}, now=NOW) == []
     assert checkin.injury_flags({"injury": "Q", "nfl_injury_status": "Questionable",
-                                 "nfl_injury_reported_at": old}, now=NOW) == ["stale_injury"]
+                                 "nfl_injury_report_date": old}, now=NOW) == ["stale_injury"]
     assert checkin.injury_flags({"injury": "Q", "nfl_injury_status": "Questionable"}, refresh_stale=True,
                                 now=NOW) == ["stale_injury"]
     assert checkin.injury_flags({"injury": "Q", "nfl_injury_status": "Out"}, now=NOW) == ["injury_conflict"]
@@ -946,13 +947,19 @@ def test_every_week_names_the_starters_out_and_the_eligible_players_left():
 
 
 # ------------------------------------------------------------------ matchup wording and the noise band
-@pytest.mark.parametrize("margin,says", [(12.53, "good matchup"), (11.9, "inside the noise band"),
-                                         (-11.9, "inside the noise band"), (-12.5, "tough matchup"),
-                                         (12.0, "inside the noise band")])
-def test_good_matchup_only_when_the_margin_is_outside_the_noise_band(margin, says):
+@pytest.mark.parametrize("margin,says", [(13.5, "good matchup"), (10.5, "inside the noise band"),
+                                         (-10.5, "inside the noise band"), (-13.5, "tough matchup"),
+                                         (12.53, "at the edge of the noise band"),
+                                         (11.99, "at the edge of the noise band"),
+                                         (11.0, "at the edge of the noise band"),
+                                         (13.0, "at the edge of the noise band"),
+                                         (-12.0, "at the edge of the noise band"),
+                                         (12.0, "at the edge of the noise band")])
+def test_the_margin_is_only_good_beyond_the_edge_of_the_noise_band(margin, says):
     text = checkin.matchup_read(margin, 12.0)
     assert text.startswith(says)
     assert ("good matchup" in text) is (says == "good matchup")
+    assert ("toss-up" in text) is (says == "inside the noise band")      # the edge is not a toss-up either
 
 
 def test_the_opponent_block_carries_the_margin_and_its_reading():
@@ -961,7 +968,10 @@ def test_the_opponent_block_carries_the_margin_and_its_reading():
     opp, _ = checkin._opponent({"home": me, "away": them}, "9")
     assert opp["margin"] == 7.08 and opp["read"].startswith("inside the noise band")
     assert "good matchup" not in opp["read"]
-    them["total_proj"] = 118.55
+    them["total_proj"] = 118.55                               # a margin of 12.53: within a point of the band
+    opp, _ = checkin._opponent({"home": me, "away": them}, "9")
+    assert opp["read"].startswith("at the edge of the noise band") and "good matchup" not in opp["read"]
+    them["total_proj"] = 115.0                                # 16.08: clearly outside
     opp, _ = checkin._opponent({"home": me, "away": them}, "9")
     assert opp["read"].startswith("good matchup")
 
@@ -1126,3 +1136,313 @@ def test_a_worse_wire_player_is_said_to_be_worse_by_more_than_the_tie_band():
     assert "under the" not in row["decision"] and row["decision"].startswith("no add needed, use Vic Bench (X WR)")
     row = checkin.bench_vs_wire(players, {"positions": {"WR": [_wr("Wes Wide", "WR", 9.6)]}}, 8)[0]
     assert "worse than" not in row["decision"] and "a tie inside the 1.5-point tie band" in row["decision"]
+
+
+# ------------------------------------------------------------------ 1. the injury refresh: why it timed out, and one retry
+@pytest.fixture
+def clean_inflight():
+    from nfl_mcp import upstream
+    upstream.clear_inflight()
+    yield
+    upstream.clear_inflight()
+
+
+@pytest.mark.asyncio
+async def test_a_slow_crawl_gets_one_retry_with_a_longer_wait_on_the_same_read(monkeypatch, clean_inflight):
+    calls = []
+
+    async def slow(teams=None, db=None, use_cache=True):
+        calls.append(teams)
+        await asyncio.sleep(0.15)
+        return [{"player_name": "A"}]
+    monkeypatch.setattr(injury_service, "get_injury_reports", slow)
+    rows, meta = await injury_service.get_injury_reports_with_retry(["SF"], None, wait=0.02, retry_wait=1.0)
+    assert rows == [{"player_name": "A"}] and meta["partial"] is False and meta["error"] is None
+    assert [a["outcome"] for a in meta["attempts"]] == ["timed out", "ok"]
+    assert [a["wait_seconds"] for a in meta["attempts"]] == [0.02, 1.0]
+    assert len(calls) == 1                       # one crawl, waited on twice: the retry did not start another
+
+
+@pytest.mark.asyncio
+async def test_a_crawl_that_outlasts_both_waits_reports_each_wait_and_keeps_running(monkeypatch, clean_inflight):
+    async def very_slow(teams=None, db=None, use_cache=True):
+        await asyncio.sleep(0.4)
+        return []
+    monkeypatch.setattr(injury_service, "get_injury_reports", very_slow)
+    rows, meta = await injury_service.get_injury_reports_with_retry(["SF", "GB"], None, wait=0.01, retry_wait=0.05)
+    assert meta["partial"] and rows == [] and meta["timed_out_sources"] == [injury_service.SOURCE_INJURY_CRAWL]
+    assert [a["outcome"] for a in meta["attempts"]] == ["timed out", "timed out"]
+    assert meta["error"] == "TimeoutError after 0.05 s" and meta["teams"] == 2
+    assert meta["background_running"] is True and meta["waited_seconds"] >= 0.055
+    await asyncio.sleep(0.5)                     # let the background read finish before the loop closes
+
+
+@pytest.mark.asyncio
+async def test_a_failing_crawl_is_retried_once_and_the_real_error_is_kept(monkeypatch, clean_inflight):
+    seen = []
+
+    async def boom(teams=None, db=None, use_cache=True):
+        seen.append(1)
+        raise RuntimeError("espn 503")
+    monkeypatch.setattr(injury_service, "get_injury_reports", boom)
+    rows, meta = await injury_service.get_injury_reports_with_retry(["SF"], None, wait=0.05, retry_wait=0.05)
+    assert len(seen) == 2 and [a["outcome"] for a in meta["attempts"]] == ["error", "error"]
+    assert meta["error"] == "RuntimeError: espn 503" and meta["partial"]
+    assert injury_service.INJURY_RETRY_WAIT_SECONDS > injury_service.INJURY_CRAWL_WAIT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_the_refresh_warning_names_each_try_the_waits_and_the_real_error(pages):
+    async def refresh(teams):
+        return [], {"partial": True, "waited_seconds": 36.1, "teams": 13, "background_running": True,
+                    "error": "ConnectError: all connection attempts failed",
+                    "attempts": [{"wait_seconds": 6.0, "outcome": "timed out", "error": "TimeoutError after 6 s"},
+                                 {"wait_seconds": 30.0, "outcome": "error",
+                                  "error": "ConnectError: all connection attempts failed"}]}
+    r = await build(refresh_injuries=refresh)
+    w = next(x for x in r["warnings"] if "injury refresh timed out" in x)
+    assert "Try 1: waited 6 s, timed out (TimeoutError after 6 s)" in w
+    assert "Try 2: waited 30 s, error (ConnectError: all connection attempts failed)" in w
+    assert "36.1 s in all, 13 teams" in w and "still running in the background" in w
+
+
+# ------------------------------------------------------------------ 2. report dates and staleness
+WEEK_START = date(2026, 10, 27)   # a Tuesday
+
+
+def rec(**k):
+    return {"injury": "Q", "nfl_injury_status": "Questionable", "practice_status": "DNP",
+            "nfl_injury_body_part": "Shoulder", **k}
+
+
+def test_a_record_is_stale_past_three_days_or_from_before_this_nfl_week_even_when_the_refresh_worked():
+    assert checkin.stale_reasons(rec(nfl_injury_report_date="2026-10-28T09:00:00+00:00"), now=NOW,
+                                 week_start=WEEK_START) == []
+    old = checkin.stale_reasons(rec(nfl_injury_report_date="2026-10-24T12:00:00+00:00"), now=NOW,
+                                week_start=WEEK_START)
+    assert len(old) == 2 and "4 days old (limit 3)" in old[0] and "before this NFL week started (2026-10-27)" in old[1]
+    monday = rec(nfl_injury_report_date="2026-10-26T18:00:00+00:00")        # under 3 days old, but last week's
+    assert checkin.stale_reasons(monday, now=NOW, week_start=WEEK_START) == [
+        "dated 2026-10-26, before this NFL week started (2026-10-27)"]
+    assert "stale_injury" in checkin.injury_flags(monday, refresh_stale=False, now=NOW, week_start=WEEK_START)
+    stored = rec(nfl_injury_stored_at="2026-10-20T00:00:00+00:00")           # no report date: the stored-at time
+    assert checkin.injury_record_date(stored)[1].startswith("stored-at time")
+    assert checkin.stale_reasons(stored, now=NOW)
+    assert checkin.stale_reasons({"nfl_injury_status": "Questionable"}, now=NOW) == []   # undated: no date rule
+    assert checkin.stale_reasons(rec(nfl_injury_report_date="2026-10-28T09:00:00+00:00"), refresh_stale=True,
+                                 now=NOW) == ["the injury refresh timed out"]
+
+
+def test_every_injury_record_shows_its_report_date_and_why_it_is_stale():
+    row = checkin.verify_roster([P("Pat", injury="Q", nfl="Questionable",
+                                   nfl_injury_report_date="2026-10-24T12:00:00+00:00",
+                                   nfl_injury_stored_at="2026-10-28T00:00:00+00:00")], 8, {},
+                                now=NOW, week_start=WEEK_START)["injuries"][0]
+    assert row["report_date"] == "2026-10-24T12:00:00+00:00" and row["stored_at"] == "2026-10-28T00:00:00+00:00"
+    assert row["date_used"] == row["report_date"] and row["date_basis"] == "report date"
+    assert len(row["stale_reasons"]) == 2 and "stale_injury" in row["flags"]
+    assert row["statement"].startswith("stored report (dated 2026-10-24, stale: dated 2026-10-24, 4 days old")
+
+
+def test_a_stale_record_is_quoted_as_a_stored_report_with_its_date_never_as_fact():
+    old = rec(nfl_injury_report_date="2026-10-24T12:00:00+00:00", nfl_practice_date="2026-10-23")
+    st = checkin.injury_statement(old, checkin.stale_reasons(old, now=NOW, week_start=WEEK_START))
+    assert st.startswith("stored report (dated 2026-10-24, stale: ")
+    assert st.endswith("says Questionable, practice DNP (dated 2026-10-23), Shoulder")
+    fresh = rec(nfl_injury_report_date="2026-10-28T09:00:00+00:00")
+    assert checkin.injury_statement(fresh, []) == "nfl_mcp report (dated 2026-10-28) says Questionable, practice DNP, Shoulder"
+    assert checkin.injury_statement({"injury": "IR-R"}, []) == "Yahoo alone shows IR-R; nfl_mcp has no report"
+    assert checkin.injury_statement(rec(), ["x"]).startswith("stored report (undated, stale: x)")
+
+
+def test_a_pup_or_pre_activation_record_never_makes_a_player_out_or_zero():
+    pup = B("BN", "Pat Back", "RB", 0.0, 6, nfl_injury_status="PUP", nfl_injury_report_date="2026-08-20T00:00:00+00:00")
+    pup["injury_flags"] = checkin.injury_flags(pup, now=NOW, week_start=WEEK_START)
+    assert {"season_long_status", "predates_activation", "stale_injury"} <= set(pup["injury_flags"])
+    assert "never makes a player Out" in checkin.projection_unknown(pup) and checkin.usable_projection(pup) is None
+    review = checkin.bench_review([B("RB", "Ann Starter", "RB", 15.0, 11), pup], 8)
+    assert review["ranked"] == [] and [u["name"] for u in review["unknown"]] == ["Pat Back"]
+    # an Out record written before he came back (Yahoo shows no tag) is the same, and makes no hole
+    out = B("RB", "Ned Back", "RB", 0.0, 6, nfl_injury_status="Out", nfl_injury_report_date="2026-10-10T00:00:00+00:00")
+    out["injury_flags"] = checkin.injury_flags(out, now=NOW, week_start=WEEK_START)
+    assert "predates_activation" in out["injury_flags"] and checkin.projection_unknown(out)
+    assert checkin.starter_holes([], [out]) == []
+    # a fresh Out that Yahoo agrees on is real
+    real = B("BN", "Rae Real", "RB", 0.0, 6, injury="O", nfl_injury_status="Out",
+             nfl_injury_report_date="2026-10-28T09:00:00+00:00")
+    real["injury_flags"] = checkin.injury_flags(real, now=NOW, week_start=WEEK_START)
+    assert real["injury_flags"] == [] and checkin.usable_projection(real) == 0.0
+    # a PUP both sources show is consistent
+    both = B("IR", "Pia Both", "RB", None, 6, injury="PUP-R", nfl_injury_status="PUP",
+             nfl_injury_report_date="2026-08-20T00:00:00+00:00")
+    assert "season_long_status" not in checkin.injury_flags(both, now=NOW, week_start=WEEK_START)
+
+
+def test_the_warning_for_an_ignored_record_says_it_creates_no_out_and_no_zero():
+    row = checkin.verify_roster([P("Pat", injury=None, nfl="PUP", nfl_injury_report_date="2026-08-20T00:00:00+00:00",
+                                   slot="BN")], 8, {}, now=NOW, week_start=WEEK_START)
+    text = " ".join(checkin.verification_warnings(row))
+    assert "season-long status or a record older than his activation" in text and "no Out and no 0 projection" in text
+
+
+# ------------------------------------------------------------------ 3. a fresher single-source lead beats a stale record
+def _inj(**k):
+    return {"label": "Pat Back (X WR)", "stale_reasons": ["dated 2026-10-24, 4 days old (limit 3)"],
+            "date_used": "2026-10-24T12:00:00+00:00",
+            "statement": "stored report (dated 2026-10-24, stale: x) says Questionable", **k}
+
+
+def _post(**k):
+    return {"author": "agg.example", "relayed_reporter": "Reporter A", "url": "https://example.test/p/1",
+            "text": "[Reporter A] WR Pat Back (knee) went from DNP to limited. twitter.com/Reporter/status/1",
+            "posted_at": "2026-10-27T19:00:00Z", "mentions": ["Pat Back (X WR)"], "independent_origins": 1, **k}
+
+
+def test_a_fresher_lead_replaces_a_stale_stored_record_and_is_labelled_single_source():
+    stale, fresh = _inj(), _inj(stale_reasons=[])
+    other = _inj(label="Someone Else (X WR)")
+    checkin.attach_leads([stale, fresh, other], [_post(), _post(posted_at="2026-10-20T19:00:00Z", text="older")])
+    assert stale["statement"].startswith("single-source lead from agg.example relaying Reporter A, posted 2026-10-27: ")
+    assert "went from DNP to limited" in stale["statement"] and "twitter.com" not in stale["statement"]
+    assert "Unconfirmed; it is newer than the stored report (dated 2026-10-24, stale" in stale["statement"]
+    assert stale["stored_statement"].startswith("stored report (dated 2026-10-24") and stale["fresher_lead"]["single_source"]
+    assert fresh["statement"].startswith("stored report") and "fresher_lead" not in fresh   # a current record is kept
+    assert "fresher_lead" not in other
+    older_only = _inj()
+    checkin.attach_leads([older_only], [_post(posted_at="2026-10-23T19:00:00Z")])           # not newer than the record
+    assert "fresher_lead" not in older_only
+    two = _inj()
+    checkin.attach_leads([two], [_post(independent_origins=2)])
+    assert two["statement"].startswith("lead from 2 independent accounts") and not two["fresher_lead"]["single_source"]
+
+
+@pytest.mark.asyncio
+async def test_the_roster_carries_the_statement_to_quote_for_every_injured_player(pages):
+    async def cmp(league_id, rws, week):
+        players = [_row(r, week) for r in rws]
+        for o in players:
+            if o["name"] == "Matthew Golden":
+                o.update(injury="Q", nfl_injury_status="Questionable", practice_status="DNP",
+                         nfl_injury_body_part="Shoulder", nfl_injury_report_date="2026-10-24T12:00:00+00:00")
+        return await fake_compare(players=players)(league_id, rws, week)
+
+    async def posts(handles, hours, limit, watch):
+        return {"items": [{"author": "agg.example", "text": "[Reporter A] WR Matthew Golden went from DNP to limited",
+                           "posted_at": "2026-10-27T19:00:00Z", "mentions_watched_player": ["Matthew Golden"]}],
+                "errors": 0}
+    r = await build(compare=cmp, posts=posts, now=NOW, week_start=WEEK_START)
+    golden = next(s for s in r["roster"]["slots"] if s["name"] == "Matthew Golden")
+    assert golden["injury_statement"].startswith("single-source lead from agg.example relaying Reporter A")
+    row = next(i for i in r["verification"]["injuries"] if i["name"] == "Matthew Golden")
+    assert row["stored_statement"].startswith("stored report (dated 2026-10-24, stale:")
+    assert row["report_date"] == "2026-10-24T12:00:00+00:00"
+
+
+# ------------------------------------------------------------------ 5. a backup at a single-starter position is insurance
+class _Prov:
+    def __init__(self, rows):
+        self.rows, self.calls = rows, []
+
+    async def get_free_agents(self, pos):
+        self.calls.append(pos)
+        return self.rows.get(pos, [])
+
+
+def _fa(name, pos):
+    return {"name": name, "team": "X", "position": pos, "player_id": name.lower(), "injury": None,
+            "availability": {"state": "FA"}}
+
+
+def _points(table, seen):
+    async def project(players, **kw):
+        seen.append(kw)
+        return {"success": True, "projections": [
+            {"player": p["name"], "player_id": p.get("player_id"), "projected_points": table[p["name"]]}
+            for p in players]}
+    return project
+
+
+@pytest.mark.asyncio
+async def test_replacement_ease_counts_the_free_agents_who_project_above_a_backup():
+    players = [B("QB", "Cal Cousins", "QB", 20.0, 13), B("BN", "Sam Shough", "QB", None, 8, on_bye=True, player_id="s1"),
+               B("RB", "Ann Starter", "RB", 15.0, 11)]
+    prov = _Prov({"QB": [_fa(n, "QB") for n in ("Q1", "Q2", "Q3", "Q4", "Q5")]})
+    seen: list = []
+    table = {"Sam Shough": 14.0, "Q1": 16.0, "Q2": 15.0, "Q3": 14.5, "Q4": 13.0, "Q5": 12.0}
+    warnings: list[str] = []
+    out = await checkin.replaceability(prov, _points(table, seen), LG, 8, players, {}, warnings)
+    info = out["id:s1"]
+    assert info["free_agents_above"] == 3 and info["free_agents_checked"] == 5 and info["easy"]
+    assert info["week"] == 9 and seen[0]["week"] == 9 and info["bench_projection"] == 14.0   # on bye: judged after it
+    assert "3 of 5 free-agent QBs project above him (14.0) in week 9" in info["text"]
+    assert "the best is Q1 (X QB) (16.0, FA)" in info["text"]
+    assert prov.calls == ["QB"] and warnings == []          # no bench RB, so the RB list is not read
+
+
+def test_a_backup_qb_is_injury_insurance_and_easy_insurance_ranks_as_a_drop_first():
+    players = [B("QB", "Cal Cousins", "QB", 20.0, 13), B("BN", "Sam Shough", "QB", None, 8, on_bye=True, player_id="s1"),
+               B("WR", "Una Wide", "WR", 12.0, 10), B("BN", "Wes Cover", "WR", 9.0, 6)]
+    easy = {"id:s1": {"easy": True, "free_agents_above": 3, "free_agents_checked": 5, "week": 9,
+                      "text": "3 of 5 free-agent QBs project above him (14.0) in week 9"}}
+    got = checkin.bench_review(players, 8, easy)["ranked"]
+    assert [d["name"] for d in got] == ["Sam Shough", "Wes Cover"]
+    shough = got[0]
+    assert shough["does_a_job"] and shough["insurance_kinds"] == ["single"]
+    assert "injury insurance: the only QB starter is Cal Cousins (X QB)" in shough["note"]
+    assert "easy to replace: 3 of 5 free-agent QBs project above him (14.0) in week 9" in shough["note"]
+    hard = {"id:s1": {**easy["id:s1"], "easy": False, "free_agents_above": 0,
+                      "text": "0 of 5 free-agent QBs project above him (14.0) in week 9"}}
+    got = checkin.bench_review(players, 8, hard)["ranked"]
+    assert [d["name"] for d in got] == ["Wes Cover", "Sam Shough"] and "hard to replace: 0 of 5" in got[1]["note"]
+    plain = checkin.bench_review(players, 8)["ranked"]
+    assert all(d["does_a_job"] for d in plain) and "does neither job" not in " ".join(d["note"] for d in plain)
+
+
+@pytest.mark.asyncio
+async def test_the_checkin_reads_the_backup_positions_free_agents_and_shows_how_replaceable_he_is(pages, monkeypatch):
+    prov = await runtime.get_provider(LG)
+    real = prov.get_free_agents
+
+    async def agents(pos, status="A"):
+        if pos in ("QB", "TE"):
+            return [_fa(f"{pos}{i}", pos) for i in range(1, 7)]
+        return await real(pos, status)
+    monkeypatch.setattr(prov, "get_free_agents", agents)
+    r = await build()
+    shough = next(d for d in r["drop_candidates"] if d["name"] == "Tyler Shough")
+    assert shough["does_a_job"] and shough["replacement"]["week"] == 9            # on bye now: judged in week 9
+    assert shough["replacement"]["free_agents_checked"] == 6
+    assert "free-agent QBs project above him" in shough["note"] and "replace" in shough["note"]
+    kittle = next(d for d in r["drop_candidates"] if d["name"] == "George Kittle")
+    assert kittle["replacement"] is not None and "injury insurance: the only TE starter" in kittle["note"]
+
+
+# ------------------------------------------------------------------ 6. quotes and predictions are not leads
+@pytest.mark.parametrize("text,why", [
+    ('DB Sam Corner says the Mavericks will win Sunday. Sam said, "we will win this game." Sounds like a guarantee?',
+     "prediction"),
+    ("Mavericks coach guarantees a win this week", "prediction"),
+    ('RB Ann Back said, "I feel great about the offense."', "player quote"),
+    ("[Rep] WR Pat Back (knee) is questionable for Sunday; he said \"I feel good\"", None),
+    ('Coach says "he will be out Sunday" (WR Pat Back)', None),
+    ("[Rep] WR Pat Back went from DNP to limited", None),
+    ("Mavericks sign a free agent kicker", None)])
+def test_quote_or_prediction(text, why):
+    assert checkin.quote_or_prediction(text) == why
+
+
+@pytest.mark.asyncio
+async def test_quotes_and_predictions_are_dropped_before_leads_are_counted(pages):
+    async def posts(handles, hours, limit, watch):
+        return {"items": [
+            {"author": "agg.example", "text": '[Rep] DB Sam Corner says Kirk Cousins\' team will win. Sam said, "it has to be."',
+             "posted_at": "2026-10-28T20:00:00Z", "mentions_watched_player": ["Kirk Cousins"]},
+            {"author": "agg.example", "text": "[Rep] QB Kirk Cousins (ankle) limited in practice",
+             "posted_at": "2026-10-28T19:00:00Z", "mentions_watched_player": ["Kirk Cousins"]},
+            {"author": "agg.example", "text": "unrelated", "mentions_watched_player": []}], "errors": 0}
+    r = await build(posts=posts)
+    assert r["news"]["count"] == 1 and "limited in practice" in r["news"]["items"][0]["text"]
+    assert [d["reason"] for d in r["news"]["dropped"]] == ["prediction"]
+    assert r["news"]["by_player"]["Kirk Cousins (LV QB)"]["posts"] == 1
+    assert any(w.startswith("Dropped 1 news post(s) that are player quotes or predictions") for w in r["warnings"])
+    assert any("News: 1 post(s) from 1 independent origin(s)" in w for w in r["warnings"])
