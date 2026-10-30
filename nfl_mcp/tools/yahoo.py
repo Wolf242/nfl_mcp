@@ -201,8 +201,14 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
       neither.
       drop_unknown lists bench players whose projection of 0 comes from an unverified Out
       designation (stale, conflicting or Yahoo-only): they are not ranked
-    - close_calls: each starter and same-eligibility bench player whose projections are inside the
-      1.5-point tie band: a toss-up, never a pick; compare_players takes it from there
+    - injury_refresh: when the injury reports for your roster's teams were last refreshed and for how
+      many teams, whether an injury crawl is running now, and the background warmer's state; its
+      ``line`` reads "injuries last refreshed at <time> (N teams)". The server refreshes them in the
+      background (at start, every 30 minutes Thursday to Monday, every 2 hours otherwise)
+    - close_calls: each starter and same-eligibility bench player whose median projection (across
+      nfl_mcp, model, Sleeper and Yahoo, as compare_players takes it) is inside the 1.5-point tie band,
+      or whose sources disagree (one inside the band, another outside it, or on who leads), with every
+      source's gap: a toss-up or an unclear call, never a pick; compare_players takes it from there
     - opponent: projected points, margin and its reading (a "good matchup" only outside the
       noise band), injured starters, starters on bye
     - byes: the next four weeks: which starters are out (full names), the active players at each
@@ -229,7 +235,7 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
     mid, err = _mid(roster_id)
     if err:
         return err
-    from .. import injury_service, projections, ros, waiver_target_tools
+    from .. import injury_service, injury_warmer, projections, ros, waiver_target_tools
     from ..database import get_shared_db
     from ..week_context import resolve_season_week
     from ..yahoo.checkin import build_checkin
@@ -259,7 +265,8 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
         await get_provider(league_id), league_id, mid, int(week), compare=compare_projections,
         project=project, targets=waiver_target_tools.get_waiver_targets,
         posts=news_social.get_insider_posts, schedules=schedules if season else None,
-        refresh_injuries=refresh_injuries, week_start=week_start)
+        refresh_injuries=refresh_injuries, week_start=week_start,
+        injury_freshness=lambda teams: injury_warmer.freshness(db, teams))
 
 
 class _ReadOnlyDb:

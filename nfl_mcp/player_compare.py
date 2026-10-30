@@ -42,7 +42,7 @@ KEY_DEFENDER_SNAP_SHARE = 0.60
 PROJECTION_EPS, RED_ZONE_EPS, FLOOR_CEILING_EPS = 0.05, 0.5, 1.0
 INSIDE_10_EPS = 5.0          # points of inside-10 carry share below which two players are level
 MIN_GAMES_PERCENTILE = 8     # fewer games than this and a 20th/80th percentile says nothing
-SOURCE_NAMES = {"nfl_mcp": "nfl_mcp", "model": "model", "sleeper": "Sleeper", "yahoo": "Yahoo"}
+SOURCE_NAMES = ck.SOURCE_NAMES
 _SPLITS = {
     "QB": ("passing_yards", "passing_tds", "rushing_yards", "rushing_tds"),
     "RB": ("rushing_yards", "rushing_tds", "receptions", "receiving_yards", "receiving_tds"),
@@ -549,34 +549,8 @@ def _source_values(p: dict) -> dict[str, float]:
 
 def projection_view(a: dict, b: dict) -> dict:
     """The median of each player's available projection sources, every source's own gap, and whether the
-    sources disagree (on who leads, or on whether the gap is outside the tie band)."""
-    la, lb = a["label"], b["label"]
-    va, vb = _source_values(a), _source_values(b)
-    med_a = round(statistics.median(va.values()), 1) if va else None
-    med_b = round(statistics.median(vb.values()), 1) if vb else None
-    gaps = {k: round(va[k] - vb[k], 1) for k in SOURCE_NAMES if k in va and k in vb}
-    view: dict[str, Any] = {
-        "basis": "median of the available sources (" + ", ".join(SOURCE_NAMES[k] for k in SOURCE_NAMES if k in va or k in vb) + ")",
-        "a_sources": va, "b_sources": vb, "a_median": med_a, "b_median": med_b,
-        "gap": round(med_a - med_b, 1) if med_a is not None and med_b is not None else None,
-        "source_gaps": gaps, "sources_disagree": False, "disagreement": None}
-    reasons = []
-    leaders = {k: (la if g > 0 else lb) for k, g in gaps.items() if abs(g) > PROJECTION_EPS}
-    if len(set(leaders.values())) > 1:
-        reasons.append("they disagree on who leads: " + "; ".join(
-            f"{', '.join(SOURCE_NAMES[k] for k in leaders if leaders[k] == who)} favor{'s' if sum(1 for k in leaders if leaders[k] == who) == 1 else ''} {who}"
-            for who in dict.fromkeys(leaders.values())))
-    outside = [k for k, g in gaps.items() if abs(g) >= TIE_BAND]
-    inside = [k for k, g in gaps.items() if abs(g) < TIE_BAND]
-    if outside and inside:
-        reasons.append(f"{', '.join(f'{SOURCE_NAMES[k]} ({gaps[k]:+.1f})' for k in outside)} "
-                       f"{'is' if len(outside) == 1 else 'are'} outside the {TIE_BAND:g}-point tie band while "
-                       f"{', '.join(f'{SOURCE_NAMES[k]} ({gaps[k]:+.1f})' for k in inside)} "
-                       f"{'is' if len(inside) == 1 else 'are'} inside it")
-    if reasons:
-        view["sources_disagree"] = True
-        view["disagreement"] = "sources disagree: " + "; and ".join(reasons) + "."
-    return view
+    sources disagree (see :func:`checkin.source_view`, which the check-in's close calls share)."""
+    return ck.source_view(_source_values(a), _source_values(b), a["label"], b["label"], PROJECTION_EPS)
 
 
 def _red_zone(a: dict, b: dict) -> dict:

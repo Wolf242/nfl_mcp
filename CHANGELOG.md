@@ -7,8 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Injury warmer** (`injury_warmer.py`): the server crawls the injuries for your Yahoo roster's and
+  opponent's teams at start, then every 30 minutes Thursday to Monday and every 2 hours
+  Tuesday and Wednesday (US Eastern), never starting a crawl while one is running. A tool call
+  that arrives mid-refresh waits for it. `NFL_MCP_INJURY_WARM=0` turns it off. `fantasy_checkin`
+  gains `injury_refresh`: "injuries last refreshed at <time> (N teams)" and whether a crawl is
+  running now.
+
 ### Changed
 
+- **Injury crawl uses ESPN's league-wide injury list** (one request, about 0.3 s) instead of a
+  list page and a detail request per report. The list shows only each team's newest 25 reports,
+  so a team at the cap is partial and never pruned. `NFL_MCP_INJURY_TEAM_LIST=0` restores the
+  per-report crawl.
+- **Check-in `close_calls`** use the same gap as `compare_players`: the median across nfl_mcp,
+  model, Sleeper and Yahoo. A pair where one source puts the two inside the 1.5-point band and
+  another outside it (or the sources split on who leads) is listed even if the median is outside,
+  as "not a clear call", with `source_gaps` and the sources named. The shared logic is
+  `checkin.source_view`.
 - **`compare_players` verdict.** The gap is the median of each player's available projection
   sources (nfl_mcp, model, Sleeper, Yahoo), every source's gap is shown, and "sources disagree"
   names the sources when they split on who leads or straddle the tie band. Floor and ceiling are

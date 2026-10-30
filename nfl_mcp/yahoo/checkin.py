@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import logging
 import re
+import statistics
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from ..teams import normalize_team
 from .idmap import norm_name, norm_team, player_key, player_label
@@ -696,13 +698,65 @@ def bench_vs_wire(players: list[dict], wire: dict, week: int) -> list[dict]:
     return out
 
 
+# The projection sources a player can have, as the roster rows name them. compare_players reads the same four.
+SOURCE_FIELDS = {"nfl_mcp": "our_projection", "model": "model_projection", "sleeper": "sleeper_projection",
+                 "yahoo": "yahoo_projection"}
+SOURCE_NAMES = {"nfl_mcp": "nfl_mcp", "model": "model", "sleeper": "Sleeper", "yahoo": "Yahoo"}
+PROJECTION_EPS = 0.05  # a source gap this small does not favour either player
+
+
+def source_view(va: dict[str, float], vb: dict[str, float], la: str, lb: str, eps: float = PROJECTION_EPS) -> dict:
+    """The median of each player's projection sources, every source's own gap (a minus b), and whether the
+    sources disagree: on who leads, or on whether the gap is outside the tie band. Shared by compare_players
+    and the check-in's close calls, so the two call a pair the same way."""
+    med_a = round(statistics.median(va.values()), 1) if va else None
+    med_b = round(statistics.median(vb.values()), 1) if vb else None
+    gaps = {k: round(va[k] - vb[k], 1) for k in SOURCE_NAMES if k in va and k in vb}
+    view: dict[str, Any] = {
+        "basis": "median of the available sources (" + ", ".join(SOURCE_NAMES[k] for k in SOURCE_NAMES if k in va or k in vb) + ")",
+        "a_sources": va, "b_sources": vb, "a_median": med_a, "b_median": med_b,
+        "gap": round(med_a - med_b, 1) if med_a is not None and med_b is not None else None,
+        "source_gaps": gaps, "sources_disagree": False, "disagreement": None}
+    reasons = []
+    leaders = {k: (la if g > 0 else lb) for k, g in gaps.items() if abs(g) > eps}
+    if len(set(leaders.values())) > 1:
+        reasons.append("they disagree on who leads: " + "; ".join(
+            f"{', '.join(SOURCE_NAMES[k] for k in leaders if leaders[k] == who)} favor{'s' if sum(1 for k in leaders if leaders[k] == who) == 1 else ''} {who}"
+            for who in dict.fromkeys(leaders.values())))
+    outside = [k for k, g in gaps.items() if abs(g) >= PLAYER_TIE_POINTS]
+    inside = [k for k, g in gaps.items() if abs(g) < PLAYER_TIE_POINTS]
+    if outside and inside:
+        reasons.append(f"{', '.join(f'{SOURCE_NAMES[k]} ({gaps[k]:+.1f})' for k in outside)} "
+                       f"{'is' if len(outside) == 1 else 'are'} outside the {PLAYER_TIE_POINTS:g}-point tie band while "
+                       f"{', '.join(f'{SOURCE_NAMES[k]} ({gaps[k]:+.1f})' for k in inside)} "
+                       f"{'is' if len(inside) == 1 else 'are'} inside it")
+    if reasons:
+        view["sources_disagree"] = True
+        view["disagreement"] = "sources disagree: " + "; and ".join(reasons) + "."
+    return view
+
+
+def projection_sources(p: dict) -> dict[str, float]:
+    """Every source with a number for this roster row; nfl_mcp's is dropped when it is unreliable (an unverified
+    Out designation) and none count on a bye."""
+    if p.get("on_bye"):
+        return {}
+    out = {k: p[f] for k, f in SOURCE_FIELDS.items() if p.get(f) is not None}
+    if projection_unknown(p):
+        out.pop("nfl_mcp", None)
+    return out
+
+
 def close_calls(players: list[dict]) -> list[dict]:
-    """Starters and same-eligibility bench players whose projections are inside the tie band.
+    """Starters and same-eligibility bench players the projections cannot tell apart.
 
     A starter is compared with every bench player who could take his slot (a WR slot takes a WR, the
-    flex an RB, WR or TE) and is not on bye or out. Projections within :data:`PLAYER_TIE_POINTS` of
-    each other cannot tell the two apart, so each pair is a toss-up, not a reason to switch; the pair
-    is the input for ``compare_players``. Closest first.
+    flex an RB, WR or TE) and is not on bye or out. The gap is the median across each player's available
+    sources (nfl_mcp, model, Sleeper, Yahoo), as in ``compare_players``. A pair is listed when that gap is
+    inside :data:`PLAYER_TIE_POINTS`, and also when the sources disagree (one inside the band, another
+    outside it, or on who leads) even if the median is outside it: such a pair is not a clear call either.
+    Each is a toss-up or an unclear call, not a reason to switch; the pair is the input for
+    ``compare_players``. Closest first.
     """
     starters = [p for p in players if p["slot"] not in STARTER_EXCLUDED and p.get("name") and not p.get("on_bye")]
     bench = [p for p in players if p["slot"] == "BN" and not p.get("on_bye") and p.get("injury") not in UNAVAILABLE_TAGS]
@@ -713,17 +767,28 @@ def close_calls(players: list[dict]) -> list[dict]:
             continue
         allowed = FLEX_POSITIONS.get(slot_label(st["slot"]), [st["position"]])
         for b in bench:
-            mine = usable_projection(b)
-            if mine is None or b["position"] not in allowed or abs(mine - base) >= PLAYER_TIE_POINTS:
+            if usable_projection(b) is None or b["position"] not in allowed:
                 continue
-            gap = round(mine - base, 1)
-            higher = (f"{label_of(b)} projects {abs(gap):.1f} higher, but inside the tie band that is not a reason to switch"
-                      if gap > 0 else f"{label_of(st)} projects {abs(gap):.1f} higher, inside the tie band"
-                      if gap < 0 else "identical projections")
+            view = source_view(projection_sources(b), projection_sources(st), label_of(b), label_of(st))
+            if view["gap"] is None:
+                continue
+            gap, disagree = view["gap"], view["sources_disagree"]
+            if abs(gap) >= PLAYER_TIE_POINTS and not disagree:
+                continue
+            higher = (f"{label_of(b)} projects {abs(gap):.1f} higher" if gap > 0 else
+                      f"{label_of(st)} projects {abs(gap):.1f} higher" if gap < 0 else "identical projections")
+            if abs(gap) < PLAYER_TIE_POINTS:
+                lead = (f"toss-up: {higher}, but inside the tie band that is not a reason to switch" if gap > 0 else
+                        f"toss-up: {higher}, inside the tie band" if gap < 0 else "toss-up: identical projections")
+            else:
+                lead = f"not a clear call: the median says {higher}, outside the tie band, but the sources do not agree"
+            reading = lead + ". " + (view["disagreement"][0].upper() + view["disagreement"][1:] + " " if disagree else "")
             out.append({
-                "slot": slot_label(st["slot"]), "starter": label_of(st), "starter_projection": base,
-                "bench": label_of(b), "bench_projection": mine, "gap": gap,
-                "reading": f"toss-up: {higher}. The projections cannot say who to start; look at usage, matchup and the "
+                "slot": slot_label(st["slot"]), "starter": label_of(st), "starter_projection": view["b_median"],
+                "bench": label_of(b), "bench_projection": view["a_median"], "gap": gap,
+                "source_gaps": view["source_gaps"], "sources_disagree": disagree, "disagreement": view["disagreement"],
+                "basis": view["basis"],
+                "reading": reading + "The projections cannot say who to start; look at usage, matchup and the "
                            "tiebreakers with compare_players, and do not treat either as a pick.",
                 "compare": [label_of(st), label_of(b)]})
     return sorted(out, key=lambda c: abs(c["gap"]))
@@ -1143,6 +1208,7 @@ async def build_checkin(
     posts: Callable[..., Awaitable[dict]] | None = None,
     schedules: Callable[[list[int]], Awaitable[dict]] | None = None,
     refresh_injuries: Callable[[list[str]], Awaitable[tuple]] | None = None,
+    injury_freshness: Callable[[list[str]], dict] | None = None,
     today: date | None = None,
     now: datetime | None = None,
     week_start: date | None = None,
@@ -1182,8 +1248,8 @@ async def build_checkin(
     # nfl_mcp's own injury reports for the roster's teams, so Yahoo's tags have something to be checked
     # against. Bounded: on a timeout the stored reports are used and the result says so.
     refresh_stale = False
+    teams = sorted({t for t in (normalize_team(r.get("team")) for r in rows if r["position"] != "DEF") if t})
     if refresh_injuries is not None:
-        teams = sorted({t for t in (normalize_team(r.get("team")) for r in rows if r["position"] != "DEF") if t})
         try:
             _, meta = await refresh_injuries(teams)
             if meta.get("partial"):
@@ -1192,6 +1258,12 @@ async def build_checkin(
         except Exception as e:
             refresh_stale = True
             warnings.append(f"Could not refresh nfl_mcp's injury reports ({e}); injury tags may be unverified.")
+    injury_refresh = None
+    if injury_freshness is not None:  # read after the refresh, so a crawl it just finished is counted
+        try:
+            injury_refresh = injury_freshness(teams)
+        except Exception as e:
+            warnings.append(f"Could not tell when the injury reports were last refreshed ({e}).")
     cmp = await compare(league_id, rows, week)
     warnings += cmp.get("warnings") or []
     for p in cmp["players"]:
@@ -1357,6 +1429,7 @@ async def build_checkin(
         "drop_candidates": drops,
         "drop_unknown": drop_unknown,
         "close_calls": close,
+        "injury_refresh": injury_refresh,
         "drop_basis": ("job test: insurance for a starter's bye or injury in the next "
                        f"{BYE_WEEKS_AHEAD} weeks, or a path to a bigger role; the drop is whoever does neither"),
         "opponent": opponent,

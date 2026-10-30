@@ -766,6 +766,8 @@ The server supports extensive configuration via environment variables:
 - `NFL_MCP_PREFETCH_ATHLETES`: Refresh athletes cache during prefetch (0 or 1, default: 1)
 - `NFL_MCP_PREFETCH_ATHLETES_INTERVAL`: Athletes refresh interval in seconds (default: 86400)
 - `NFL_MCP_PREFETCH_NEWS`: Poll player news during prefetch (0 or 1, default: 1)
+- `NFL_MCP_INJURY_WARM`: Keep the injury cache warm for your Yahoo roster's and opponent's teams (0 or 1, default: 1; needs `NFL_MCP_DEFAULT_LEAGUE` + `NFL_MCP_MY_ROSTER`); `NFL_MCP_INJURY_WARM_GAME_INTERVAL` / `NFL_MCP_INJURY_WARM_OFF_INTERVAL`: seconds between refreshes Thursday-Monday / Tuesday-Wednesday (default: 1800 / 7200)
+- `NFL_MCP_INJURY_TEAM_LIST`: Read ESPN's league-wide injury list instead of one request per report (0 or 1, default: 1)
 - `NFL_MCP_PREFETCH_NEWS_INTERVAL` / `NFL_MCP_PREFETCH_NEWS_GAMEDAY_INTERVAL`: news poll interval in seconds (default: 2700 / 900 in the game-day windows)
 - `NFL_MCP_NEWS_SOURCES`: news sources (`espn_fantasy`, `nbc`, `cbs`; default all): a comma list keeps those, `-name` drops one (`-nbc`), `none` stops them
 - `NFL_MCP_NEWS_NBC_PAGES` / `NFL_MCP_NEWS_NBC_FIRST_PAGES`: NBC pages per poll (default 3; 12 on the first poll)

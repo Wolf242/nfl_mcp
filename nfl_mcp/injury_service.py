@@ -23,6 +23,14 @@ UNKNOWN_NAME = "Unknown"  # placeholder when an athlete's name could not be fetc
 # list requests, and every request waits on the outbound ESPN rate limiter.
 INJURY_LIST_PAGE_SIZE = 200
 REQUEST_TIMEOUT = 10.0  # Seconds per request
+# ESPN's league-wide injury list, grouped by team, with every report inline: one request instead of a
+# list page and a detail request per report (~1900). It shows each team's newest TEAM_LIST_CAP reports
+# only, so a team at the cap is partial (older reports, mostly long-term IR, are missing): its reports
+# are used but it is never marked complete, so nothing is pruned from it.
+TEAM_LIST_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
+TEAM_LIST_CAP = 25
+TEAM_LIST_MIN_TEAMS = 28  # fewer team groups than this is not the league's list: fall back to the athlete pages
+TEAM_LIST_TIMEOUT = 30.0  # the payload is ~9 MB
 # An empty team list is only believed in small numbers. One team's last injured
 # player recovering is routine; several teams losing every report in the same
 # crawl is ESPN serving empty lists (an outage), and pruning on it would mark
@@ -121,6 +129,73 @@ def worst_status(*statuses: str | None) -> str | None:
 # ESPN's "Doubtful" while Sleeper already had him "Out". Within a rung, a
 # designation that rules the player out outranks one that merely doubts him.
 _TIEBREAK = {"Doubtful": 0, "Out": 1, "Inactive": 1}
+
+
+def status_confidence(normalized_status: str | None) -> int:
+    """ESPN is a single source, but its status IS the confidence signal: a definitive Out/IR/Doubtful is
+    far more certain than Questionable (which in turn beats a plain Active listing)."""
+    s = (normalized_status or "").lower()
+    if any(k in s for k in ("out", "injured reserve", "reserve", "doubtful", "suspend")):
+        return 90
+    if "questionable" in s:
+        return 65
+    if any(k in s for k in ("probable", "active", "day", "limited")):
+        return 55
+    return 50
+
+
+def _list_athlete_id(athlete: dict) -> str | None:
+    """The ESPN athlete id of a team-list entry (it is in the player-card link and the headshot URL)."""
+    if athlete.get("id"):
+        return str(athlete["id"])
+    for link in athlete.get("links") or []:
+        m = re.search(r"/id/(\d+)", str(link.get("href") or ""))
+        if m:
+            return m.group(1)
+    m = re.search(r"/(\d+)\.png", str((athlete.get("headshot") or {}).get("href") or ""))
+    return m.group(1) if m else None
+
+
+def parse_team_injury_list(payload: Any) -> dict[str, list[InjuryReport]]:
+    """``{team: reports}`` from ESPN's league-wide injury list (see :data:`TEAM_LIST_URL`), in the same
+    shape the athlete-page crawl produces. An entry without an athlete id or a team is skipped; a team
+    group with no entries is kept, empty."""
+    from .teams import normalize_team
+
+    out: dict[str, list[InjuryReport]] = {}
+    groups = payload.get("injuries") if isinstance(payload, dict) else None
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict):
+            continue
+        team = normalize_team(group.get("displayName")) or None
+        reports: list[InjuryReport] = []
+        for item in group.get("injuries") or []:
+            athlete = item.get("athlete") if isinstance(item, dict) else None
+            if not isinstance(athlete, dict):
+                continue
+            pid = _list_athlete_id(athlete)
+            t = normalize_team((athlete.get("team") or {}).get("abbreviation")) or team
+            if not pid or not t:
+                continue
+            team = team or t
+            status_data = item.get("status")
+            raw = status_data if isinstance(status_data, str) else (status_data or {}).get("description", "Unknown")
+            normalized = InjuryAggregator.normalize_status(raw)
+            details = item.get("details") if isinstance(item.get("details"), dict) else {}
+            type_data = item.get("type")
+            pos = athlete.get("position")
+            reports.append(InjuryReport(
+                player_id=pid, player_name=athlete.get("displayName") or UNKNOWN_NAME, team_id=t,
+                position=pos.get("abbreviation") if isinstance(pos, dict) else None,
+                injury_status=normalized,
+                injury_type=details.get("type") or (type_data.get("description") if isinstance(type_data, dict) else None),
+                injury_description=item.get("shortComment") or item.get("longComment"),
+                game_status=_game_status(details), severity=InjuryAggregator.get_severity(normalized),
+                confidence=status_confidence(normalized), sources=["ESPN"],
+                date_reported=item.get("date"), return_date=parse_return_date(item)))
+        if team:
+            out.setdefault(team, []).extend(reports)
+    return out
 
 
 def extract_athlete_id(athlete_url: str | None) -> str | None:
@@ -317,10 +392,16 @@ class InjuryAggregator:
         """
         self._require_client()
         teams = teams or self.NFL_TEAMS
+        requested = len(teams)
 
         try:
             from .config import get_http_headers
             headers = get_http_headers("nfl_teams")
+
+            # The league-wide team list first (one request); only the teams it does not cover fall back
+            # to the list-page-plus-detail crawl.
+            listed = await self._fetch_team_list(teams)
+            teams = [t for t in teams if t not in listed] if listed else teams
 
             # Fetch all teams concurrently with semaphore control
             async def fetch_team_with_semaphore(team: str) -> list[InjuryReport]:
@@ -338,8 +419,8 @@ class InjuryAggregator:
             )
 
             # Flatten results, filtering out exceptions
-            all_injuries = []
-            successful_teams = 0
+            all_injuries = [r for reports in listed.values() for r in reports] if listed else []
+            successful_teams = sum(1 for reports in listed.values() if reports) if listed else 0
             for i, result in enumerate(team_results):
                 if isinstance(result, list):
                     all_injuries.extend(result)
@@ -348,12 +429,54 @@ class InjuryAggregator:
                 elif isinstance(result, BaseException):
                     logger.debug(f"[InjuryAggregator] Team {teams[i]} failed: {result}")
 
-            logger.info(f"[InjuryAggregator] ESPN: fetched {len(all_injuries)} injuries from {successful_teams}/{len(teams)} teams")
+            logger.info(f"[InjuryAggregator] ESPN: fetched {len(all_injuries)} injuries from {successful_teams}/{requested} teams")
             return all_injuries
 
         except Exception as e:
             logger.error(f"[InjuryAggregator] ESPN fetch failed: {e}")
             return []
+
+    async def _fetch_team_list(self, teams: list[str]) -> dict[str, list[InjuryReport]]:
+        """``{team: reports}`` for the requested teams from ESPN's league-wide team list, or ``{}`` when it
+        is switched off (``NFL_MCP_INJURY_TEAM_LIST=0``), unreachable or does not look like the league's
+        list. A team under :data:`TEAM_LIST_CAP` reports is complete (and may be pruned); one at the cap
+        is partial. ``self.team_list_seconds`` and ``self.team_list_truncated`` say how it went."""
+        self.team_list_seconds: float | None = None
+        self.team_list_truncated: list[str] = []
+        if os.getenv("NFL_MCP_INJURY_TEAM_LIST", "1") == "0":
+            return {}
+        started = time.monotonic()
+        try:
+            from .config import get_http_headers
+            resp = await self._http_client.get(TEAM_LIST_URL, headers=get_http_headers("nfl_teams"),
+                                               timeout=TEAM_LIST_TIMEOUT)
+            if resp.status_code != 200:
+                logger.info(f"[InjuryAggregator] team list returned {resp.status_code}; using the athlete pages")
+                return {}
+            parsed = parse_team_injury_list(resp.json())
+        except Exception as e:
+            logger.info(f"[InjuryAggregator] team list unavailable ({type(e).__name__}: {e}); using the athlete pages")
+            return {}
+        if len(parsed) < TEAM_LIST_MIN_TEAMS:
+            logger.info(f"[InjuryAggregator] team list covers {len(parsed)} teams; using the athlete pages")
+            return {}
+        out: dict[str, list[InjuryReport]] = {}
+        for team in teams:
+            if team not in parsed:
+                continue
+            out[team] = parsed[team]
+            self.complete_teams.discard(team)
+            self.empty_teams.discard(team)
+            if len(parsed[team]) >= TEAM_LIST_CAP:
+                self.team_list_truncated.append(team)
+            else:
+                self.complete_teams.add(team)
+                if not parsed[team]:
+                    self.empty_teams.add(team)
+        self.team_list_seconds = round(time.monotonic() - started, 2)
+        logger.info(f"[InjuryAggregator] team list: {sum(len(v) for v in out.values())} reports for {len(out)} teams "
+                    f"in {self.team_list_seconds}s ({len(self.team_list_truncated)} at the {TEAM_LIST_CAP}-report cap)")
+        return out
 
     async def _fetch_team_espn_injuries(self, team: str, headers: dict) -> list[InjuryReport]:
         """Fetch injuries for a single team from ESPN with batch detail fetching.
@@ -561,15 +684,7 @@ class InjuryAggregator:
             # "Questionable" (which in turn beats a plain "Active" listing). A
             # flat 60 made get_high_confidence_injuries(min_confidence=70) always
             # empty, so grade confidence by status certainty instead.
-            _s = (normalized_status or "").lower()
-            if any(k in _s for k in ("out", "injured reserve", "reserve", "doubtful", "suspend")):
-                _confidence = 90
-            elif "questionable" in _s:
-                _confidence = 65
-            elif any(k in _s for k in ("probable", "active", "day", "limited")):
-                _confidence = 55
-            else:
-                _confidence = 50
+            _confidence = status_confidence(normalized_status)
 
             details = data.get("details") or {}
             return InjuryReport(
@@ -1007,8 +1122,18 @@ async def get_injury_reports_bounded(teams: list[str] | None = None, db=None,
     (one per team set; it persists what it finds, so the next call is fresh)
     and the stored reports are returned with ``meta`` ``{partial: True,
     timed_out_sources: ["espn_injury_crawl"], stale: True}``."""
-    from .upstream import inflight, single_flight, wait_bounded
+    from .upstream import inflight, running_task, single_flight, wait_bounded
 
+    # The background warmer is refreshing right now: let it finish (it is seconds with the team list) and
+    # read what it stored, instead of starting a second crawl beside it.
+    warm = running_task("injury_reports:warm")
+    if warm is not None:
+        began = time.monotonic()
+        try:
+            await wait_bounded(warm, wait)
+        except Exception:  # its failure is its own; this call crawls as usual below
+            pass
+        wait = max(1.0, wait - (time.monotonic() - began))
     key = _crawl_key(teams)
     if inflight(key) and inflight_cap is not None:
         # An earlier call's crawl is still running: it will not be done in

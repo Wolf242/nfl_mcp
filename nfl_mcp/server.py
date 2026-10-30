@@ -151,6 +151,8 @@ _STARTUP_TASK_SHUTDOWN_GRACE_SECONDS = 10.0
 # Global state for prefetch task
 _prefetch_task: asyncio.Task | None = None
 _shutdown_event: asyncio.Event | None = None
+# The injury warmer (injury_warmer.run_loop) runs beside the prefetch, whether or not prefetch is on.
+_warmer_task: asyncio.Task | None = None
 
 
 async def _refresh_athletes(nfl_db: NFLDatabase, tag: str = "Prefetch") -> None:
@@ -600,11 +602,16 @@ def _create_prefetch_lifespan(nfl_db: NFLDatabase):
     @asynccontextmanager
     async def app_lifespan(app):
         """Lifespan context manager for background prefetch task."""
-        global _prefetch_task, _shutdown_event
+        global _prefetch_task, _shutdown_event, _warmer_task
 
         _shutdown_event = asyncio.Event()
         _prefetch_task = asyncio.create_task(_startup_warmup(nfl_db, _shutdown_event))
         logger.info("Background startup/prefetch task started")
+        from . import injury_warmer
+        if injury_warmer.warm_enabled():
+            _warmer_task = asyncio.create_task(
+                injury_warmer.run_loop(nfl_db, injury_warmer.yahoo_roster_teams, _shutdown_event))
+            logger.info("Background injury warmer started")
 
         try:
             yield  # Server running
@@ -623,6 +630,16 @@ def _create_prefetch_lifespan(nfl_db: NFLDatabase):
                 elif not task.cancelled() and task.exception() is not None:
                     logger.warning(f"Prefetch task ended with error: {task.exception()}")
                 logger.info("Prefetch task stopped")
+            warmer = _warmer_task
+            if warmer is not None:
+                if event:
+                    event.set()
+                done, _ = await asyncio.wait({warmer}, timeout=_STARTUP_TASK_SHUTDOWN_GRACE_SECONDS)
+                if not done:
+                    warmer.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        await warmer
+                _warmer_task = None
 
     return app_lifespan
 

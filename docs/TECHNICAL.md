@@ -158,6 +158,9 @@ variables take precedence.
 | `NFL_MCP_PREFETCH_ATHLETES` | `1` (default) refreshes the Sleeper athletes cache (player names/teams/positions) during prefetch — once at startup and then every interval below. `0` disables it. |
 | `NFL_MCP_PREFETCH_ATHLETES_INTERVAL` | Athletes-cache refresh interval, seconds (default 86400 = daily). |
 | `NFL_MCP_PREFETCH_NEWS` | `1` (default) polls player news during prefetch (`news` scope). |
+| `NFL_MCP_INJURY_WARM` | `1` (default) keeps the injury cache warm for your Yahoo roster's and opponent's teams (needs `NFL_MCP_DEFAULT_LEAGUE` and `NFL_MCP_MY_ROSTER`; independent of `NFL_MCP_PREFETCH`). `0` turns it off. |
+| `NFL_MCP_INJURY_WARM_GAME_INTERVAL` / `NFL_MCP_INJURY_WARM_OFF_INTERVAL` | Warmer interval, seconds: Thursday to Monday US Eastern (default 1800) / Tuesday and Wednesday (default 7200). |
+| `NFL_MCP_INJURY_TEAM_LIST` | `1` (default) reads ESPN's league-wide injury list (one request) instead of a list page and a detail request per report; `0` restores the per-report crawl. |
 | `NFL_MCP_PREFETCH_NEWS_INTERVAL` | News poll interval, seconds (default 2700 = 45 min). |
 | `NFL_MCP_PREFETCH_NEWS_GAMEDAY_INTERVAL` | News poll interval in the game-day windows (Sun 10:00-20:30 ET, Mon/Thu 17:00-20:30, Sat 14:00-20:30), seconds (default 900). |
 | `NFL_MCP_NEWS_SOURCES` | News sources `espn_fantasy`, `nbc`, `cbs` (default all): a comma list keeps those, `-name` drops one (`-nbc` = all but NBC), `none` stops them. |

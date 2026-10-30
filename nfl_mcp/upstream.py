@@ -54,6 +54,16 @@ def single_flight(key: str, factory: Callable[[], Coroutine[Any, Any, Any]]) -> 
     return task
 
 
+def inflight_keys(prefix: str) -> list[str]:
+    """The keys starting with ``prefix`` whose background read is running on this loop."""
+    return sorted(k for k in list(_inflight) if k.startswith(prefix) and inflight(k))
+
+
+def running_task(key: str) -> asyncio.Task | None:
+    """The running background task for ``key`` on this loop, or None."""
+    return _inflight[key] if inflight(key) else None
+
+
 def inflight(key: str) -> bool:
     """Whether a background read for ``key`` is running on this loop."""
     task = _inflight.get(key)

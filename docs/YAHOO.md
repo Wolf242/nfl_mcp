@@ -80,8 +80,32 @@ check-in's rankings (the projection engine's own number is shown, and marked unk
 injury or availability wording; they are listed in `news.dropped`.
 
 **Close calls.** `close_calls` lists every starter and same-eligibility bench player (a WR slot takes a WR, the flex an RB, WR
-or TE; nobody on bye or out) whose projections are inside the 1.5-point tie band. Each is a toss-up, not a reason to switch: the pair
-goes to `compare_players`.
+or TE; nobody on bye or out) that the projections cannot separate. The gap is the **median** across each player's available sources
+(nfl_mcp, model, Sleeper, Yahoo), the same rule `compare_players` uses, and every source's own gap is listed (`source_gaps`). A pair is
+listed when the median gap is inside the 1.5-point tie band, and also when the sources disagree (one source inside the band and another
+outside it, or on who leads) even if the median is outside it: those read "not a clear call" with `sources_disagree` and the sources
+named. Each is a toss-up or an unclear call, not a reason to switch: the pair goes to `compare_players`.
+
+## The injury warmer
+
+A check-in compares Yahoo's injury tags with nfl_mcp's own reports, and a cold crawl used to take minutes (146 s measured for a
+13-team roster), so it timed out. The server now keeps those reports fresh in the background (`injury_warmer.py`):
+
+* **At start** it crawls the teams on your Yahoo roster and this week's opponent's (read through the Yahoo provider; needs
+  `NFL_MCP_DEFAULT_LEAGUE` and `NFL_MCP_MY_ROSTER`). If the roster cannot be read it warms all 32 teams; with no Yahoo team set it does nothing.
+* **Then** every 30 minutes Thursday to Monday and every 2 hours Tuesday and Wednesday (US Eastern; `NFL_MCP_INJURY_WARM_GAME_INTERVAL` /
+  `_OFF_INTERVAL`). It is independent of `NFL_MCP_PREFETCH`; `NFL_MCP_INJURY_WARM=0` turns it off.
+* **Never two crawls at once.** A refresh is skipped while any injury crawl is running (its own or a tool call's) and tried again a
+  minute later. A tool call that arrives while the warmer is refreshing waits for it and reads what it stored.
+* **Seconds, not minutes.** ESPN has a league-wide injury list with every report inline (`site.api.espn.com/.../nfl/injuries`), so a
+  crawl is one request (about 0.3 s measured for three teams) instead of a list page plus a detail request per report. It shows each
+  team's **newest 25 reports only**, so a team at that cap is treated as partial: its reports are stored, but nothing is pruned from
+  it, and older reports (mostly long-term IR) come only from an earlier full crawl. `NFL_MCP_INJURY_TEAM_LIST=0` restores the
+  per-report crawl, which is complete.
+
+The check-in's `injury_refresh` says when the roster's injury reports were last refreshed and for how many teams ("injuries last
+refreshed at Thu 2026-10-29 18:12 ET (13 teams)"), lists roster teams with older or no reports, and says whether a crawl is running
+now and what the warmer last did.
 
 ## Comparing two players: `compare_players`
 

@@ -1470,6 +1470,41 @@ def test_close_calls_pair_a_starter_with_a_same_eligibility_bench_player_inside_
     assert checkin.close_calls([B("RB", "Ann Back", "RB", None, 8, on_bye=True), B("BN", "Rob Rush", "RB", 15.0, 6)]) == []
 
 
+def test_a_pair_the_sources_disagree_on_is_a_close_call_even_when_the_median_is_outside_the_band():
+    # nfl_mcp has them 4.0 apart, Yahoo 1.4 apart: two sources, so the median gap is 2.7, outside the band
+    players = [B("RB", "Ann Back", "RB", 18.0, 11, yahoo_projection=15.0), B("BN", "Rob Rush", "RB", 14.0, 6, yahoo_projection=13.6)]
+    got = checkin.close_calls(players)
+    assert len(got) == 1
+    c = got[0]
+    assert c["gap"] == -2.7 and c["source_gaps"] == {"nfl_mcp": -4.0, "yahoo": -1.4}
+    assert c["sources_disagree"] is True and c["starter_projection"] == 16.5 and c["bench_projection"] == 13.8
+    assert "nfl_mcp (-4.0) is outside the 1.5-point tie band while Yahoo (-1.4) is inside it" in c["disagreement"]
+    assert c["reading"].startswith("not a clear call") and "Sources disagree" in c["reading"]
+    assert "do not treat either as a pick" in c["reading"] and c["compare"] == ["Ann Back (X RB)", "Rob Rush (X RB)"]
+    # the same pair with Yahoo agreeing that they are far apart is not a close call
+    assert checkin.close_calls([B("RB", "Ann Back", "RB", 18.0, 11, yahoo_projection=15.0),
+                                B("BN", "Rob Rush", "RB", 14.0, 6, yahoo_projection=12.0)]) == []
+
+
+def test_close_calls_use_the_median_of_nfl_mcp_model_sleeper_and_yahoo_and_still_flag_a_dissenting_source():
+    st = B("RB", "Ann Back", "RB", 18.0, 11, model_projection=15.0, sleeper_projection=15.0, yahoo_projection=15.0)
+    bn = B("BN", "Rob Rush", "RB", 14.0, 6, model_projection=13.9, sleeper_projection=13.9, yahoo_projection=13.6)
+    got = checkin.close_calls([st, bn])
+    assert len(got) == 1 and got[0]["gap"] == -1.1                    # medians 15.0 vs 13.9: inside the band
+    assert got[0]["source_gaps"] == {"nfl_mcp": -4.0, "model": -1.1, "sleeper": -1.1, "yahoo": -1.4}
+    assert got[0]["sources_disagree"] and got[0]["reading"].startswith("toss-up")
+    assert "nfl_mcp (-4.0) is outside" in got[0]["disagreement"] and "model (-1.1), Sleeper (-1.1), Yahoo (-1.4) are inside it" in got[0]["disagreement"]
+    assert got[0]["basis"] == "median of the available sources (nfl_mcp, model, Sleeper, Yahoo)"
+    # every source inside the band: a plain toss-up with nothing to flag
+    quiet = checkin.close_calls([B("RB", "Ann Back", "RB", 15.0, 11, model_projection=15.2, sleeper_projection=14.8),
+                                 B("BN", "Rob Rush", "RB", 14.5, 6, model_projection=14.4, sleeper_projection=14.2)])
+    assert len(quiet) == 1 and quiet[0]["sources_disagree"] is False and quiet[0]["disagreement"] is None
+    # an unreliable nfl_mcp number does not count, and neither does anything on bye
+    assert "nfl_mcp" not in checkin.projection_sources(B("RB", "Ann Back", "RB", 0.0, 11, yahoo_projection=9.0,
+                                                          nfl_injury_status="Out", injury="Q", injury_flags=["injury_conflict"]))
+    assert checkin.projection_sources(B("RB", "Ann Back", "RB", 15.0, 8, on_bye=True)) == {}
+
+
 @pytest.mark.asyncio
 async def test_the_checkin_lists_its_close_calls_and_each_one_is_a_toss_up_not_a_pick(pages):
     r = await build()
@@ -1477,3 +1512,23 @@ async def test_the_checkin_lists_its_close_calls_and_each_one_is_a_toss_up_not_a
     for c in r["close_calls"]:
         assert abs(c["gap"]) < checkin.PLAYER_TIE_POINTS and c["reading"].startswith("toss-up")
     assert [abs(c["gap"]) for c in r["close_calls"]] == sorted(abs(c["gap"]) for c in r["close_calls"])
+
+
+# ------------------------------------------------------------------ injury freshness
+@pytest.mark.asyncio
+async def test_the_checkin_reports_when_injuries_were_last_refreshed_and_whether_a_crawl_runs(pages):
+    asked = []
+
+    def freshness(teams):
+        asked.append(teams)
+        return {"line": f"injuries last refreshed at Thu 2026-10-29 18:12 ET ({len(teams)} teams). No injury crawl is running now.",
+                "teams": len(teams), "crawl_running": False}
+    r = await build(injury_freshness=freshness)
+    assert r["injury_refresh"]["line"].startswith("injuries last refreshed at Thu 2026-10-29 18:12 ET (")
+    assert r["injury_refresh"]["crawl_running"] is False and asked and asked[0] == sorted(set(asked[0]))
+    assert (await build())["injury_refresh"] is None                       # not wired: the key is there, empty
+
+    def broken(teams):
+        raise RuntimeError("db locked")
+    r = await build(injury_freshness=broken)
+    assert r["injury_refresh"] is None and any("when the injury reports were last refreshed" in w for w in r["warnings"])
