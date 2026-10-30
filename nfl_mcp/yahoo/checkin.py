@@ -34,6 +34,8 @@ BYE_WEEKS_AHEAD = 4
 WIRE_CANDIDATES = 10  # rows read per position and projected; the best few are shown
 TARGET_POOL = 10  # targets asked for before the Yahoo join drops the ones Yahoo does not list
 TARGETS_SHOWN = 5
+# Read every check-in, whatever else is going on: the top free agents here are compared with the one starter at the position.
+ALWAYS_READ_POSITIONS = ("QB", "TE", "K", "DEF")
 # Below this many team points, a gap between nfl_mcp's and Yahoo's projection is noise.
 NOISE_BAND_POINTS = 12.0
 # Half the running per-team projection error sets the band, never below this floor (team totals).
@@ -852,6 +854,102 @@ def starter_holes(slots: list[dict], players: list[dict]) -> list[dict]:
     return holes
 
 
+def starter_wire_checks(players: list[dict], candidates: dict[str, list[dict]],
+                        why: dict[str, str] | None = None) -> tuple[list[dict], list[dict]]:
+    """For each position whose free agents were read: the best free agent against your starter there, and a target for
+    every free agent who projects above him -- even when the gap is inside the noise (under the
+    :data:`PLAYER_TIE_POINTS` tie band), which each target and row says.
+
+    ``candidates`` are the projected wire rows by position. With several starters at a position the weakest is the
+    one compared. A position whose starter is on bye or out is a hole (its own target); one whose starter's game has
+    started is locked, so nothing is offered for it.
+    """
+    checks, targets = [], []
+    tie = f"{PLAYER_TIE_POINTS:g}-point noise band"
+    for pos, rows in candidates.items():
+        at = [p for p in players if p["position"] == pos and p["slot"] not in STARTER_EXCLUDED and p.get("name")]
+        row: dict[str, Any] = {"position": pos, "why_read": (why or {}).get(pos), "free_agents_read": len(rows),
+                               "starter": None, "starter_projection": None, "best_free_agent": None, "gap": None,
+                               "above_starter": [], "inside_noise": None, "locked": False}
+        scored = [r for r in rows if r.get("our_projection") is not None]
+        row["free_agents_projected"] = len(scored)
+        if not at:
+            continue
+        if any(p.get("on_bye") or p.get("injury") == "O" for p in at):
+            row["read"] = f"{pos}: your starter is on bye or out, so this is a hole and has its own target"
+            checks.append(row)
+            continue
+        known = [(usable_projection(p), p) for p in at if usable_projection(p) is not None]
+        if not known:
+            row["read"] = f"{pos}: no projection for your starter, so no comparison"
+            checks.append(row)
+            continue
+        base, st = min(known, key=lambda x: x[0])
+        row.update(starter=label_of(st), starter_projection=base)
+        if st.get("started"):
+            row["locked"] = True
+            row["read"] = f"{pos}: {label_of(st)}'s game has started, so the spot is locked and no free agent is compared"
+            checks.append(row)
+            continue
+        if not scored:
+            row["read"] = f"{pos}: none of the {len(rows)} free agents read has a projection"
+            checks.append(row)
+            continue
+        best = max(scored, key=lambda r: r["our_projection"])
+        gap = round(best["our_projection"] - base, 1)
+        row["best_free_agent"] = {"label": best.get("label") or label_of(best), "tag": best["tag"],
+                                  "projection": best["our_projection"]}
+        row["gap"] = gap
+        above = sorted((r for r in scored if r["our_projection"] > base), key=lambda r: -r["our_projection"])
+        head = (f"{pos}: best free agent {row['best_free_agent']['label']} {best['our_projection']:.1f} "
+                f"({best['tag']}) against your {label_of(st)} {base:.1f}: {gap:+.1f}")
+        if not above:
+            row["read"] = head + "; no free agent projects above him"
+        else:
+            inside = gap < PLAYER_TIE_POINTS
+            row["inside_noise"] = inside
+            row["read"] = head + (f"; projects above him, but inside the noise (under the {tie})" if inside
+                                  else f"; projects above him, outside the noise (the {tie})")
+            for r in above:
+                diff = round(r["our_projection"] - base, 1)
+                noisy = diff < PLAYER_TIE_POINTS
+                item = {
+                    "name": r["name"], "label": r.get("label") or label_of(r), "position": r.get("position"),
+                    "team": r.get("team"), "player_id": r.get("player_id"), "projected_points": r["our_projection"],
+                    "upgrade_points": diff, "verdict": "above_starter", "source": "starter_check",
+                    "fills": None, "over_starter": label_of(st), "inside_noise": noisy,
+                    "noise_note": (f"inside the noise: {diff:+.1f} against {label_of(st)}, under the {tie}" if noisy
+                                   else f"outside the noise: {diff:+.1f} against {label_of(st)}, over the {tie}"),
+                    "waiver_recommendation": None, "tag": r["tag"], "yahoo_tag": r["tag"]}
+                row["above_starter"].append({k: item[k] for k in ("label", "tag", "projected_points", "upgrade_points",
+                                                                  "inside_noise")})
+                targets.append(item)
+        checks.append(row)
+    return checks, targets
+
+
+_NOTHING_BEATS = re.compile(r"Nothing on waivers beats your current starters")
+
+
+def starter_check_note(read: list[str], above: list[dict], prior: str | None) -> str:
+    """The targets note: which positions were read and how the free agents compared with your starters, then the
+    waiver ranking's own message (which names the positions it considered). When a free agent does project above
+    a starter, a bare "nothing beats your starters" would contradict it, so that opening is reworded."""
+    where = ", ".join(read)
+    if above:
+        out = [t for t in above if not t["inside_noise"]]
+        inside = [t for t in above if t["inside_noise"]]
+        head = (f"Read the top free agents at {where} and compared each with your starter there: {len(above)} project above "
+                f"a starter ({len(out)} outside the noise, {len(inside)} inside the {PLAYER_TIE_POINTS:g}-point noise "
+                "band); each is listed as a target with its gap.")
+        if prior:
+            prior = _NOTHING_BEATS.sub("The waiver ranking, which weighs more than one week, found no claim worth making", prior)
+    else:
+        head = (f"Read the top free agents at {where} and compared each with your starter there: none projects above a "
+                "starter.")
+    return head + (" " + prior if prior else "")
+
+
 def hole_targets(holes: list[dict], wire: dict) -> tuple[list[dict], list[str]]:
     """The best available Yahoo free agent for each hole, with Yahoo's own FA / W (date) tag.
 
@@ -996,6 +1094,15 @@ def _totals_scope(totals: dict) -> str:
         else f"{totals.get('players_compared')} of {totals.get('starters')} starters")
 
 
+def _my_live(matchup: dict, mid: str) -> dict[str, dict]:
+    """``{yahoo id: {live_projection, game_state}}`` for the players on your side of the matchup page."""
+    sides = [matchup.get("home") or {}, matchup.get("away") or {}]
+    mine = next((s for s in sides if (s.get("team") or {}).get("mid") == str(mid)), None) or {}
+    return {str(p["yahoo_id"]): {"live_projection": p.get("live_projection"),
+                                 "game_state": (p.get("game") or {}).get("state")}
+            for p in (mine.get("starters") or []) + (mine.get("bench") or []) if p.get("yahoo_id")}
+
+
 def _full_names(prov, matchup: dict) -> None:
     """The live matchup page abbreviates names ("C. Hubbard"): swap in the full name by Yahoo id where the provider knows it."""
     lookup = getattr(prov, "full_name", None)
@@ -1013,24 +1120,38 @@ def _full_names(prov, matchup: dict) -> None:
                         p["name"], p["name_abbreviated"] = full, False
 
 
-def side_total(starters: list[dict]) -> dict:
-    """One side of the matchup page as "points so far plus Yahoo's projections for players yet to play".
+def _final(p: dict) -> bool:
+    g = p.get("game") or {}
+    return g.get("state") == "final" or str(g.get("kickoff") or "").strip().lower().startswith("final")
 
-    A starter whose game has started counts for his points so far (``counted_as_played``, each with his game's
-    state); every other starter counts for Yahoo's projection. A starter with neither number is listed in
-    ``no_number`` and left out. When no game has started the total is Yahoo's own pre-game total.
+
+def side_total(starters: list[dict]) -> dict:
+    """One side of the matchup page, each starter counted once: a finished game at his points, a game in progress at
+    Yahoo's live projection (points so far plus the rest of the game) when Yahoo shows one -- else at the points so far
+    -- and a game yet to be played at Yahoo's projection. ``counted_as_played`` says how each started player was
+    counted. A starter with neither number is listed in ``no_number`` and left out. When no game has started the
+    total is Yahoo's own pre-game total.
     """
     rows = [p for p in starters if not p.get("empty") and p.get("name")]
     played = [p for p in rows if p.get("points") is not None]
     ahead = [p for p in rows if p.get("points") is None and p.get("projected") is not None]
     none = [p for p in rows if p.get("points") is None and p.get("projected") is None]
+    entries = []
+    for p in played:
+        live = p.get("live_projection") if not _final(p) else None
+        entries.append({"label": label_of(p), "points": p["points"],
+                        "game": ((p.get("game") or {}).get("state") or "started"),
+                        "counted_at": "live_projection" if live is not None else "points",
+                        "counted_value": live if live is not None else p["points"],
+                        "live_projection": p.get("live_projection")})
     so_far = round(sum(p["points"] for p in played), 2)
     remaining = round(sum(p["projected"] for p in ahead), 2)
+    counted = round(sum(e["counted_value"] for e in entries), 2)
     return {
-        "points_so_far": so_far, "projected_yet_to_play": remaining, "total": round(so_far + remaining, 2),
+        "points_so_far": so_far, "projected_yet_to_play": remaining, "total": round(counted + remaining, 2),
         "starters": len(rows), "started": len(played), "yet_to_play": len(ahead),
-        "counted_as_played": [{"label": label_of(p), "points": p["points"],
-                               "game": ((p.get("game") or {}).get("state") or "started")} for p in played],
+        "counted_as_played": entries,
+        "counted_at_live_projection": [e["label"] for e in entries if e["counted_at"] == "live_projection"],
         "no_number": [label_of(p) for p in none],
     }
 
@@ -1073,8 +1194,10 @@ def _opponent(matchup: dict, mid: str, band: float = NOISE_BAND_POINTS,
         "team": theirs["team"]["name"], "mid": theirs["team"]["mid"],
         "projected_points": their_total, "my_projected_points": my_total,
         "margin": margin, "noise_band": band, "read": matchup_read(margin, band),
-        "basis": ("points so far plus Yahoo's projections for players yet to play" if started
-                  else "Yahoo's pre-game projections"),
+        "basis": ("finished games at points, games in progress at Yahoo's live projection (points so far plus the rest of "
+                  "the game), games yet to play at Yahoo's projection" if started else "Yahoo's pre-game projections"),
+        "counted_at_live_projection": {"mine": my_side["counted_at_live_projection"],
+                                       "theirs": their_side["counted_at_live_projection"]},
         "games_started": {"mine": my_side["started"], "theirs": their_side["started"]},
         "counted_as_played": {"mine": my_side["counted_as_played"], "theirs": their_side["counted_as_played"]},
         "points_so_far": {"mine": my_side["points_so_far"], "theirs": their_side["points_so_far"]},
@@ -1232,6 +1355,25 @@ _AVAILABILITY = re.compile(
     r"(?:is|are|be|listed|declared)\s+out|return\w*\s+(?:to|from|this|next)|injured reserve)\b", re.I)
 
 
+_SCORE = re.compile(r"\b(touchdowns?|tds?|scores?|scored|scoring|field goals?|lambeau leap|end ?zone)\b", re.I)
+_AVAILABILITY_MORE = re.compile(
+    r"\b(hurt|exit\w*|left the game|locker room|x-?rays?|cart|sidelin\w*|status|expected to|miss(?:es|ed|ing)?|"
+    r"will play|won't play|game-time|did not|didn't|not (?:play|return)|questionable|day-to-day)\b", re.I)
+_URL = re.compile(r"(?:https?://\S+|\b(?:twitter|x|bsky)\.(?:com|app)/\S*|\S+\.\.\.$)", re.I)
+_LEAD_TAG = re.compile(r"^\s*\[[^\]]{1,40}\]\s*")
+
+
+def score_only(text: str | None) -> str | None:
+    """``"score or touchdown only"`` for a post that reports a touchdown, a score or a field goal and nothing about the
+    player's availability (no injury, status, practice or game-time wording); else None."""
+    t = _URL.sub("", _LEAD_TAG.sub("", text or "")).strip()
+    if not t or not _SCORE.search(t):
+        return None
+    if _AVAILABILITY.search(t) or _AVAILABILITY_MORE.search(t):
+        return None
+    return "score or touchdown only"
+
+
 def quote_or_prediction(text: str | None) -> str | None:
     """Why a post is a player quote or a prediction ("guarantees a win") and not availability news,
     else None. A post that carries injury or availability wording is kept either way."""
@@ -1372,6 +1514,17 @@ async def build_checkin(
             injury_refresh = injury_freshness(teams)
         except Exception as e:
             warnings.append(f"Could not tell when the injury reports were last refreshed ({e}).")
+    matchup, matchup_error = None, None
+    try:
+        matchup = await prov.data.matchup(week, mid)
+        _full_names(prov, matchup)
+        live = _my_live(matchup, mid)
+        for r in rows:  # games in progress: Yahoo's live projection and the game's state, by Yahoo id
+            info = live.get(str(r.get("yahoo_id"))) if r.get("yahoo_id") else None
+            if info:
+                r["live_projection"], r["game_state"] = info["live_projection"], info["game_state"]
+    except Exception as e:
+        matchup_error = e
     cmp = await compare(league_id, rows, week)
     warnings += cmp.get("warnings") or []
     no_report: list[dict] = []
@@ -1416,8 +1569,20 @@ async def build_checkin(
             if pos in WIRE_POSITIONS and not any((h["player"] or h["reason"]) in r for r in reasons.get(pos, [])):
                 reasons.setdefault(pos, []).append(h["reason"])
 
+    read_why: dict[str, str] = {}
+    always_added: set[str] = set()
+    for pos in ALWAYS_READ_POSITIONS:  # compared with the starter at the position every check-in
+        if any(p["position"] == pos and p["slot"] not in STARTER_EXCLUDED and p.get("name") for p in cmp["players"]):
+            read_why[pos] = "always read"
+            if pos not in positions:
+                positions.append(pos)
+                always_added.add(pos)
+                reasons.setdefault(pos, []).append(
+                    f"read every check-in: the top {pos} free agents are compared with your starter there")
+
     wire: dict = {"positions": {}, "reasons": reasons, "holes": holes, "targets": [], "timing": []}
     wire_index: dict[str, list[dict]] = {}
+    wire_full: dict[str, list[dict]] = {}
     for pos in positions:
         try:
             wire_rows = [_wire_row(p) for p in (await prov.get_free_agents(pos))]
@@ -1428,13 +1593,17 @@ async def build_checkin(
                     candidates = await _project_wire(project, league_id, week, pos, candidates, cmp["players"], holes)
                 except Exception as e:
                     warnings.append(f"Could not project the {pos} wire: {e}")
+            wire_full[pos] = candidates
             wire["positions"][pos] = candidates[:wire_depth]
         except Exception as e:  # one page failing should not sink the check-in
             warnings.append(f"Could not read the {pos} wire: {e}")
+            if pos in always_added:  # only the reason it was asked for: it was not read
+                reasons.pop(pos, None)
     wire["timing"] = claim_timing(wire, today)
     wire["vs_bench"] = bench_vs_wire(cmp["players"], wire, week)
     wire["targets_note"] = None
     joined: list[dict] = []
+    considered: list[str] | None = None
     if targets is not None and not wire_index:
         wire["targets_note"] = ("No position has a bye hole, injury or thin depth this week, and no Yahoo "
                                 "free-agent list was read, so no targets were ranked.")
@@ -1453,6 +1622,7 @@ async def build_checkin(
                 warnings.append("get_waiver_targets failed: " + str(t.get("error")))
                 wire["targets_note"] = "get_waiver_targets failed: " + str(t.get("error"))
             else:
+                considered = t.get("positions_considered")
                 joined, dropped = _join_targets(raw, wire_index, warnings)
                 wire["targets_dropped"] = dropped
                 if not joined:
@@ -1467,13 +1637,25 @@ async def build_checkin(
     # A slot that is empty, or held by a player on bye or out, projects 0: the best available Yahoo player
     # for it is always a target, whatever the Sleeper-pool ranking said.
     hole_t, hole_notes = hole_targets(holes, wire)
-    seen = {player_key(t) for t in hole_t}
-    wire["targets"] = (hole_t + [t for t in joined if player_key(t) not in seen])[:TARGETS_SHOWN]
+    # A free agent who projects above your starter at a position is always a target, however small the gap.
+    checks, above_t = starter_wire_checks(cmp["players"], wire_full, read_why)
+    wire["starter_checks"] = checks
+    wire["positions_read"] = [{"position": pos, "why": "; ".join(reasons.get(pos, [])) or read_why.get(pos, "read")}
+                              for pos in wire["positions"]]
+    held = {player_key(t) for t in hole_t}
+    forced = hole_t + [t for t in above_t if player_key(t) not in held]
+    seen = {player_key(t) for t in forced}
+    rest = [t for t in joined if player_key(t) not in seen]
+    wire["targets"] = forced + rest[:max(0, TARGETS_SHOWN - len(forced))]
     if holes:
         wire["targets_note"] = (
             f"{len(holes)} starting slot(s) are empty, on bye or out ({'; '.join(h['reason'] for h in holes)}): "
             "the best available Yahoo free agent for each is listed as a target"
             + (f"; {'; '.join(hole_notes)}" if hole_notes else "") + ".")
+    if wire["positions"]:
+        wire["targets_note"] = starter_check_note(list(wire["positions"]), above_t, wire["targets_note"])
+        if considered:
+            wire["waiver_ranking_positions"] = considered
 
     replacement: dict[str, dict] = {}
     if project is not None:
@@ -1493,8 +1675,8 @@ async def build_checkin(
 
     opponent, opp_warn = None, []
     try:
-        matchup = await prov.data.matchup(week, mid)
-        _full_names(prov, matchup)
+        if matchup_error is not None:
+            raise matchup_error
         opponent, opp_warn = _opponent(matchup, mid, band, week)
         if opponent is not None:
             opponent["my_total_nfl_mcp"] = {
@@ -1503,8 +1685,9 @@ async def build_checkin(
             if opponent["games_started"]["mine"] or opponent["games_started"]["theirs"]:
                 opp_warn.append(
                     f"The matchup is partly played ({opponent['games_started']['mine']} of your starters and "
-                    f"{opponent['games_started']['theirs']} of theirs have started): totals are points so far plus Yahoo's "
-                    "projections for players yet to play, so the margin will move.")
+                    f"{opponent['games_started']['theirs']} of theirs have started): games in progress are counted at Yahoo's "
+                    "live projection, finished games at points and games yet to play at Yahoo's projection, so the margin "
+                    "will move.")
     except Exception as e:
         opp_warn = [f"Could not read the Yahoo matchup page (/matchup?week={week}&mid1={mid}): {e}. "
                     "The page layout may have changed; this is not a bye week."]
@@ -1523,15 +1706,15 @@ async def build_checkin(
             for i in res.get("items", []):
                 if not i.get("mentions_watched_player"):
                     continue
-                why = quote_or_prediction(i.get("text"))
+                why = quote_or_prediction(i.get("text")) or score_only(i.get("text"))
                 if why:
                     dropped.append({"author": i.get("author"), "reason": why, "text": (i.get("text") or "")[:120]})
                 else:
                     items.append(dict(i, status="lead"))
             news = {"items": items, "count": len(items), "dropped": dropped, **news_origins(items, labels_by_name)}
             if dropped:
-                warnings.append(f"Dropped {len(dropped)} news post(s) that are player quotes or predictions, not "
-                                "availability news, before counting leads.")
+                warnings.append(f"Dropped {len(dropped)} news post(s) that are player quotes, predictions or only a score or "
+                                "touchdown, not availability news, before counting leads.")
             if res.get("errors"):
                 warnings.append(f"{res['errors']} Bluesky handle(s) failed to load.")
             if items:

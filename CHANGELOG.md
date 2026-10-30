@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **"Nothing on waivers beats your starters" now says what was read.** QB, TE, K and DEF free agents are read every check-in (RB and
+  WR still only for a hole or problem) and compared with your starter at each position, with the FA / W tag; every free agent who
+  projects above a starter is a target even inside the noise, and says so. The note and the waiver ranking's own message name the
+  positions.
+- **Games in progress count at Yahoo's live projection** (points so far plus the rest of the game) when Yahoo shows one, finished
+  games at points; the totals list who was counted each way.
+- **News posts that only report a score or touchdown are dropped** (no availability information) and listed under `news.dropped`.
 - **Check-in while games are being played.** Yahoo's live matchup page (two script-drawn tables, abbreviated names) gave no opponent and
   an incomplete roster total. The browser source now waits for the lineup, `parse_matchup` reads both layouts, and team totals are
   "points so far plus projections for players yet to play" for Yahoo and nfl_mcp, naming the starters counted at points and saying which

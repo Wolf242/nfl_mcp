@@ -1448,7 +1448,7 @@ async def test_quotes_and_predictions_are_dropped_before_leads_are_counted(pages
     assert r["news"]["count"] == 1 and "limited in practice" in r["news"]["items"][0]["text"]
     assert [d["reason"] for d in r["news"]["dropped"]] == ["prediction"]
     assert r["news"]["by_player"]["Kirk Cousins (LV QB)"]["posts"] == 1
-    assert any(w.startswith("Dropped 1 news post(s) that are player quotes or predictions") for w in r["warnings"])
+    assert any(w.startswith("Dropped 1 news post(s) that are player quotes, predictions or only a score or touchdown") for w in r["warnings"])
     assert any("News: 1 post(s) from 1 independent origin(s)" in w for w in r["warnings"])
 
 
@@ -1571,3 +1571,144 @@ async def test_a_player_neither_the_capped_list_nor_the_roster_page_settled_is_n
     async def broken(rows):
         raise RuntimeError("espn down")
     assert any("capped injury list may have left out" in x for x in (await build(gap_lookup=broken))["warnings"])
+
+
+# ------------------------------------------------------------------ the wire: QB, TE, K and DEF are always read and compared
+def _starter_row(name, pos, proj, *, slot=None, on_bye=False, started=False, injury=None):
+    return {"slot": slot or pos, "name": name, "team": "KC", "position": pos, "player_id": name, "injury": injury,
+            "on_bye": on_bye, "started": started, "our_projection": proj, "yahoo_projection": proj, "label": f"{name} (KC {pos})"}
+
+
+def _free_agent(name, pos, proj, tag="FA"):
+    return {"name": name, "label": f"{name} (AA {pos})", "team": "AA", "position": pos, "player_id": name, "tag": tag,
+            "injury": None, "our_projection": proj, "upgrade": None, "projection_source": "sleeper_blend"}
+
+
+def test_a_free_agent_above_your_starter_is_a_target_even_inside_the_noise_and_says_so():
+    players = [_starter_row("Quin Back", "QB", 20.7), _starter_row("Tia End", "TE", 10.3),
+               _starter_row("Kay Kick", "K", 9.1), _starter_row("Dee Fense", "DEF", 8.3, on_bye=True)]
+    cands = {"QB": [_free_agent("Sam Arm", "QB", 21.3), _free_agent("Lou Arm", "QB", 18.0)],
+             "TE": [_free_agent("Tom Hands", "TE", 12.5, "W (Oct 31)"), _free_agent("Ted Hands", "TE", 10.3)],
+             "K": [_free_agent("Ken Foot", "K", 8.0)],
+             "DEF": [_free_agent("Bay Wall", "DEF", 7.0)]}
+    why = {p: "always read" for p in cands}
+    checks, targets = checkin.starter_wire_checks(players, cands, why)
+    by = {c["position"]: c for c in checks}
+    qb = by["QB"]
+    assert qb["starter"] == "Quin Back (KC QB)" and qb["starter_projection"] == 20.7 and qb["why_read"] == "always read"
+    assert qb["best_free_agent"] == {"label": "Sam Arm (AA QB)", "tag": "FA", "projection": 21.3}
+    assert qb["gap"] == 0.6 and qb["inside_noise"] is True
+    assert "projects above him, but inside the noise (under the 1.5-point noise band)" in qb["read"]
+    te = by["TE"]
+    assert te["gap"] == 2.2 and te["inside_noise"] is False and "outside the noise" in te["read"]
+    assert [a["label"] for a in te["above_starter"]] == ["Tom Hands (AA TE)"]            # a tie is not above
+    assert by["K"]["above_starter"] == [] and by["K"]["read"].endswith("no free agent projects above him")
+    assert "hole" in by["DEF"]["read"] and by["DEF"]["best_free_agent"] is None            # a bye is the hole logic's
+    got = {t["label"]: t for t in targets}
+    assert set(got) == {"Sam Arm (AA QB)", "Tom Hands (AA TE)"}
+    sam, tom = got["Sam Arm (AA QB)"], got["Tom Hands (AA TE)"]
+    assert (sam["upgrade_points"], sam["inside_noise"], sam["tag"], sam["yahoo_tag"]) == (0.6, True, "FA", "FA")
+    assert sam["noise_note"].startswith("inside the noise: +0.6 against Quin Back (KC QB)")
+    assert (tom["upgrade_points"], tom["inside_noise"], tom["tag"]) == (2.2, False, "W (Oct 31)")
+    assert tom["noise_note"].startswith("outside the noise") and tom["verdict"] == "above_starter"
+
+
+def test_a_locked_starter_a_missing_projection_and_a_position_with_no_starter_are_handled():
+    players = [_starter_row("Quin Back", "QB", 20.7, started=True), _starter_row("Kay Kick", "K", None)]
+    cands = {"QB": [_free_agent("Sam Arm", "QB", 30.0)], "K": [_free_agent("Ken Foot", "K", 8.0)], "TE": [_free_agent("Tom Hands", "TE", 12.0)],
+             "DEF": []}
+    checks, targets = checkin.starter_wire_checks(players, cands)
+    by = {c["position"]: c for c in checks}
+    assert by["QB"]["locked"] is True and "game has started" in by["QB"]["read"] and targets == []
+    assert "no projection for your starter" in by["K"]["read"]
+    assert "TE" not in by and "DEF" not in by                                              # no starter there: nothing to compare
+    none = checkin.starter_wire_checks([_starter_row("Kay Kick", "K", 9.0)], {"K": [_free_agent("Ken Foot", "K", None)]})[0][0]
+    assert "none of the 1 free agents read has a projection" in none["read"]
+
+
+def test_the_targets_note_says_which_positions_were_read_and_never_says_nothing_beats_a_starter_that_one_does():
+    none = checkin.starter_check_note(["RB", "QB", "TE", "K", "DEF"], [],
+                                      "Nothing on waivers beats your current starters in week 8 at RB, WR (285 free agents checked).")
+    assert none.startswith("Read the top free agents at RB, QB, TE, K, DEF and compared each with your starter there: "
+                           "none projects above a starter.")
+    assert "Nothing on waivers beats your current starters in week 8 at RB, WR (285 free agents checked)" in none
+    above = [{"inside_noise": True}, {"inside_noise": False}, {"inside_noise": True}]
+    note = checkin.starter_check_note(["QB", "TE"], above,
+                                      "Nothing on waivers beats your current starters in week 8 at RB, WR (285 free agents checked).")
+    assert "3 project above a starter (1 outside the noise, 2 inside the 1.5-point noise band)" in note
+    assert "Nothing on waivers beats" not in note
+    assert "found no claim worth making in week 8 at RB, WR (285 free agents checked)" in note
+
+
+@pytest.mark.asyncio
+async def test_the_check_in_always_reads_qb_te_k_and_def_and_lists_each_free_agent_above_a_starter(pages, tmp_path):
+    for pos in ("QB", "K"):  # the RB page, with its players relabelled
+        text = (FIX / "players_rb.html").read_text(encoding="utf-8").replace(" - RB", f" - {pos}")
+        (tmp_path / f"players_{pos}_A.html").write_text(text, encoding="utf-8")
+    shutil.copy(FIX / "players_te.html", tmp_path / "players_TE_A.html")
+    base = await build()
+    kicker = next(p for p in base["roster"]["slots"] if p["slot"] == "K")["our_projection"]
+
+    async def project(players, **kw):
+        out = []
+        for i, p in enumerate(players):
+            if p["position"] == "K":     # the second K candidate is just above the starter, the first well above
+                v = kicker + 4.0 if i == 0 else kicker + 0.5 if i == 1 else 1.0
+            else:
+                v = round(9.0 - 0.5 * i, 1)
+            out.append({"player": p["name"], "player_id": p.get("player_id"), "projected_points": v,
+                        "projection_source": "sleeper_blend"})
+        return {"success": True, "projections": out}
+    r = await build(project=project)
+    read = {x["position"]: x["why"] for x in r["wire"]["positions_read"]}
+    assert {"QB", "TE", "K", "DEF"} <= set(read) and "read every check-in" in read["K"]
+    assert set(r["wire"]["reasons"]) == set(r["wire"]["positions"])
+    k = next(c for c in r["wire"]["starter_checks"] if c["position"] == "K")
+    assert k["starter_projection"] == kicker and k["why_read"] == "always read" and k["gap"] == 4.0
+    targets = [t for t in r["wire"]["targets"] if t.get("source") == "starter_check"]
+    assert [t["inside_noise"] for t in targets] == [False, True] and [t["upgrade_points"] for t in targets] == [4.0, 0.5]
+    assert targets[1]["noise_note"].startswith("inside the noise: +0.5") and all(t["tag"] == t["yahoo_tag"] for t in targets)
+    assert "Read the top free agents at" in r["wire"]["targets_note"] and "K" in r["wire"]["targets_note"]
+    assert "2 project above a starter (1 outside the noise, 1 inside the 1.5-point noise band)" in r["wire"]["targets_note"]
+
+
+@pytest.mark.asyncio
+async def test_a_position_whose_free_agents_could_not_be_read_is_not_claimed_as_read(pages):
+    r = await build()                      # the fixture has no QB, TE or K free-agent pages
+    assert any(w.startswith("Could not read the QB wire") for w in r["warnings"])
+    assert "QB" not in {x["position"] for x in r["wire"]["positions_read"]}
+    assert set(r["wire"]["reasons"]) == set(r["wire"]["positions"])
+
+
+# ------------------------------------------------------------------ news that only reports a score or touchdown
+@pytest.mark.parametrize("text,dropped", [
+    ("[Packers] Matthew Golden touchdown! twitter.com/packers/stat...", True),
+    ("[Panthers] Chuba Hubbard gets the touchdown and does the Lambeau Leap! twitter.com/Panthers/sta...", True),
+    ("[Chiefs] Harrison Butker field goal from 52 yards. https://x.com/chiefs/status/1", True),
+    ("Kenny Pickett scores on a 3-yard run", True),
+    ("[Rams] Kyren Williams touchdown, then left the game with an injury", False),
+    ("[Rams] Kyren Williams scored but is questionable for Sunday", False),
+    ("[Jets] Garrett Wilson touchdown; he will miss practice Friday", False),
+    ("Zach Charbonnet (knee) was a full participant at Thursday's practice", False),
+    ("[Bears] Colston Loveland ruled out after the touchdown", False),
+    ("", False), (None, False)])
+def test_a_post_that_only_reports_a_score_or_touchdown_is_not_availability_news(text, dropped):
+    assert (checkin.score_only(text) == "score or touchdown only") is dropped
+
+
+@pytest.mark.asyncio
+async def test_score_only_posts_are_dropped_before_leads_are_counted_and_listed_under_news_dropped(pages):
+    async def posts(*a):
+        return {"items": [
+            {"author": "agg.bsky.social", "text": "[Panthers] Chuba Hubbard gets the touchdown! twitter.com/x/sta...",
+             "mentions_watched_player": ["Chuba Hubbard"], "posted_at": "2026-10-30T00:57:32Z"},
+            {"author": "agg.bsky.social", "text": "[Packers] Matthew Golden touchdown! twitter.com/p/sta...",
+             "mentions_watched_player": ["Matthew Golden"], "posted_at": "2026-10-30T01:34:31Z"},
+            {"author": "rep.bsky.social", "text": "[Seahawks] Zach Charbonnet (knee) is questionable for Sunday.",
+             "mentions_watched_player": ["Zach Charbonnet"], "posted_at": "2026-10-30T02:00:00Z"}]}
+    r = await build(posts=posts)
+    assert r["news"]["count"] == 1 and "questionable" in r["news"]["items"][0]["text"]
+    assert [d["reason"] for d in r["news"]["dropped"]] == ["score or touchdown only", "score or touchdown only"]
+    assert r["news"]["dropped"][0]["author"] == "agg.bsky.social" and "touchdown" in r["news"]["dropped"][0]["text"]
+    assert any(w.startswith("Dropped 2 news post(s) that are player quotes, predictions or only a score or touchdown")
+               for w in r["warnings"])

@@ -818,7 +818,7 @@ async def get_waiver_targets(
              if top else
              # An honest "nothing here" beats a ranked list of players who would
              # all make the lineup worse.
-             f"Nothing on waivers beats your current starters in week {week} "
+             f"Nothing on waivers beats your current starters in week {week} at {', '.join(sorted(wanted))} "
              f"({len(pool_scored)} free agents checked).")
             + ("" if is_faab else
                " Rolling waivers: a successful claim sends you to the back of the "

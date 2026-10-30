@@ -1,4 +1,5 @@
 """The waiver question: who is worth claiming, for one specific roster."""
+import re
 import tempfile
 from pathlib import Path
 
@@ -224,6 +225,7 @@ class TestWaiverTargets:
         out = await get_waiver_targets(LEAGUE, roster_id=7)
         assert out["targets"] == []
         assert "Nothing on waivers" in out["message"]
+        assert re.search(r"at [A-Z]{2,3}(, [A-Z]{2,3})* \(\d+ free agents checked\)", out["message"])    # names the positions read
 
     @pytest.mark.asyncio
     async def test_reports_the_leagues_own_scoring_and_waiver_type(self, db, monkeypatch):

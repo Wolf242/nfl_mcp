@@ -117,6 +117,8 @@ async def compare_projections(league_id: str, rows: list[dict], week: int | None
             "injury": r["injury"], "bye_week": r.get("bye_week"), "on_bye": on_bye,
             "started": points is not None, "points_so_far": points,
             "game_status": (r.get("game") or {}).get("kickoff"),
+            "live_projection": r.get("live_projection") if points is not None else None,
+            "game_state": r.get("game_state"),
             "yahoo_projection": theirs, "our_projection": mine,
             "model_projection": None if on_bye else p.get("model_projection"),
             "sleeper_projection": None if on_bye else p.get("sleeper_projection"),
@@ -148,13 +150,31 @@ async def compare_projections(league_id: str, rows: list[dict], week: int | None
     }
 
 
-def starter_totals(starters: list[dict]) -> dict:
-    """Yahoo's and nfl_mcp's totals over the starters as "points so far plus projections for players yet to play".
+def game_final(x: dict) -> bool:
+    """Whether a started player's game is over: the matchup page says ``final``, or the roster page's game line starts "Final"."""
+    return x.get("game_state") == "final" or str(x.get("game_status") or "").strip().lower().startswith("final")
 
-    A starter whose game has started counts for his points so far on both sides (the same actual number);
-    every other starter counts for each source's projection. A starter missing a number from either source
-    (on bye, no projection) is left out of both totals, and ``scope`` says so: a total that covers only part
-    of the starters is never given without saying which.
+
+def counted_value(x: dict) -> tuple[float, str]:
+    """What a started starter counts for in a total, and how: points when his game is final, Yahoo's live projection
+    (points so far plus the rest of the game) while it is in progress and Yahoo shows one, else the points so far."""
+    if game_final(x):
+        return x["points_so_far"], "points"
+    if x.get("live_projection") is not None:
+        return x["live_projection"], "live_projection"
+    return x["points_so_far"], "points"
+
+
+def starter_totals(starters: list[dict]) -> dict:
+    """Yahoo's and nfl_mcp's totals over the starters, each starter counted once:
+
+    * a finished game at his points;
+    * a game in progress at Yahoo's live projection (points so far plus the rest of the game) when Yahoo shows one,
+      else at the points so far (nfl_mcp has no live projection, so both totals use Yahoo's live number);
+    * a game yet to be played at each source's own projection.
+
+    A starter missing a number from either source (on bye, no projection) is left out of both totals, and ``scope``
+    says so: a total that covers only part of the starters is never given without saying which.
     """
     played = [x for x in starters if x["started"]]
     ahead = [x for x in starters if not x["started"] and x["gap"] is not None]
@@ -165,20 +185,35 @@ def starter_totals(starters: list[dict]) -> dict:
         why = ("on bye" if x["on_bye"] else "no Yahoo projection" if x["yahoo_projection"] is None
                else "no nfl_mcp projection")
         left_out.append({"label": x["label"], "reason": why})
-    pts = sum(x["points_so_far"] for x in played)
-    yahoo_total = round(pts + sum(x["yahoo_projection"] for x in ahead), 1)
-    our_total = round(pts + sum(x["our_projection"] for x in ahead), 1)
+    counted = [(x, *counted_value(x)) for x in played]
+    played_total = sum(v for _, v, _ in counted)
+    yahoo_total = round(played_total + sum(x["yahoo_projection"] for x in ahead), 1)
+    our_total = round(played_total + sum(x["our_projection"] for x in ahead), 1)
     n, compared = len(starters), len(played) + len(ahead)
+    live = [(x, v) for x, v, how in counted if how == "live_projection"]
+    pts = [(x, v) for x, v, how in counted if how == "points"]
     scope = (f"all {n} starters" if compared == n else
              f"{compared} of {n} starters; left out of both totals: "
              + ", ".join(f"{o['label']} ({o['reason']})" for o in left_out))
-    if played:
-        scope += (f"; {len(played)} started, counted at the points scored so far ("
-                  + ", ".join(f"{x['label']} {x['points_so_far']:g}" for x in played)
-                  + f"), and {len(ahead)} yet to play, counted at each source's projection")
+    parts = []
+    if live:
+        parts.append(f"{len(live)} in progress, counted at Yahoo's live projection ("
+                     + ", ".join(f"{x['label']} {v:g}, {x['points_so_far']:g} so far" for x, v in live) + ")")
+    if pts:
+        parts.append(f"{len(pts)} counted at the points scored ("
+                     + ", ".join(f"{x['label']} {x['points_so_far']:g}" for x, _ in pts) + ")")
+    if parts:
+        parts.append(f"{len(ahead)} yet to play, counted at each source's projection")
+        scope += "; " + "; ".join(parts)
     return {"yahoo": yahoo_total, "ours": our_total, "gap": round(our_total - yahoo_total, 1),
             "players_compared": compared, "starters": n,
-            "basis": "points so far for starters whose game has started, plus projections for starters yet to play",
-            "counted_as_played": [{"label": x["label"], "points": x["points_so_far"], "status": x.get("game_status")}
-                                  for x in played],
+            "basis": ("finished games at points, games in progress at Yahoo's live projection (points so far plus the rest "
+                      "of the game), games yet to play at each source's projection"),
+            "counted_as_played": [{"label": x["label"], "points": x["points_so_far"], "status": x.get("game_status"),
+                                   "counted_at": how, "counted_value": v} for x, v, how in counted],
+            "counted_at_live_projection": [{"label": x["label"], "points_so_far": x["points_so_far"], "live_projection": v}
+                                           for x, v in live],
+            "counted_at_points": [{"label": x["label"], "points": x["points_so_far"],
+                                   "why": "game final" if game_final(x) else "Yahoo shows no live projection"}
+                                  for x, _ in pts],
             "counted_as_projected": [x["label"] for x in ahead], "not_compared": left_out, "scope": scope}

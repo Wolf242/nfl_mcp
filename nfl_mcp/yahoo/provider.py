@@ -115,6 +115,7 @@ class YahooProvider:
             out.append({"slot": slot_label(s["slot"]), "name": s.get("name"), "team": s.get("team"),
                         "position": s.get("position"), "player_id": sid, "injury": s.get("injury"),
                         "yahoo_projection": s.get("projected"), "bye_week": s.get("bye"),
+                        "yahoo_id": s.get("yahoo_id"),
                         # once his game has started Yahoo shows the points so far instead of a projection
                         "fantasy_points": s.get("fantasy_points"), "game": s.get("game")})
         return out

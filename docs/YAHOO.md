@@ -76,8 +76,16 @@ never stated as fact. When a newer post names the player, the statement becomes 
 player Yahoo shows active, is flagged `season_long_status` / `predates_activation` and never makes a player Out or projects 0 in the
 check-in's rankings (the projection engine's own number is shown, and marked unknown, not rewritten).
 
-**News.** Posts that are player quotes or predictions ("guarantees a win") are dropped before leads are counted, unless they carry
-injury or availability wording; they are listed in `news.dropped`.
+**News.** Posts that are player quotes or predictions ("guarantees a win"), or that only report a score or touchdown ("Matthew
+Golden touchdown!"), are dropped before leads are counted, unless they carry injury or availability wording; they are listed in
+`news.dropped` with their reason (`prediction`, `player quote`, `score or touchdown only`).
+
+**The wire.** QB, TE, K and DEF are read every check-in, in addition to any position with a bye hole or a problem (RB and WR are
+read only for those). `wire.positions_read` says why each position was read, and `wire.starter_checks` sets the best free agent at
+each position against your starter there, with the gap, the FA / `W (date)` tag and whether the gap is inside the noise (under the
+1.5-point single-player band). Every free agent who projects above a starter is a target, even inside the noise, and says so
+(`inside_noise`, `noise_note`). `targets_note` names the positions read. A position whose list could not be read is not claimed as read;
+one whose starter is on bye or out is a hole with its own target; one whose starter's game has started is locked.
 
 **Close calls.** `close_calls` lists every starter and same-eligibility bench player (a WR slot takes a WR, the flex an RB, WR
 or TE; nobody on bye or out) that the projections cannot separate. The gap is the **median** across each player's available sources
@@ -97,10 +105,12 @@ change but shows the points instead of a projection for a started player.
   and returns `layout` (`classic`, `live` or None). Each player has `projected`, `points`, `started`, the game line (`scheduled`,
   `live`, `final`, or a bye as "No Game") and, in the live layout, `live_projection` and the stat line. The check-in swaps in full
   names by Yahoo id, or by first initial, surname, team and position when only one player fits.
-* **Totals.** A started player counts for his points so far and every other starter for the source's projection, so Yahoo and
-  nfl_mcp are compared on the same basis: "points so far plus projections for players yet to play". `starter_totals.counted_as_played`
-  names who was counted at points (with the game's status), `counted_as_projected` the rest, and `scope` says which starters a total
-  covers. A starter missing a number from either source is left out of both totals and listed with the reason in `not_compared`; a
+* **Totals.** Each starter counts once: a **finished** game at his points, a game **in progress** at Yahoo's live projection (the
+  second number in the matchup page's `Proj` cell: points so far plus the rest of the game) when Yahoo shows one, else at the points
+  so far, and a game **yet to play** at the source's projection. nfl_mcp has no live projection, so both totals use Yahoo's live
+  number for a game in progress. `starter_totals.counted_as_played` says how each started starter was counted (`counted_at`,
+  `counted_value`), `counted_at_live_projection` lists who was counted at the live number, `counted_at_points` who at points and why,
+  `counted_as_projected` the rest, and `scope` says which starters a total covers. A starter missing a number from either source is left out of both totals and listed with the reason in `not_compared`; a
   total over part of the starters is never given without saying which. The opponent block uses the same rule for both sides (Yahoo's
   numbers, since nfl_mcp has none for their players) and lists `counted_as_played` for each. A finished week is the points scored.
 * **No opponent.** If the page gives no lineup or no teams, the check-in says it could not read the Yahoo matchup page (named with its

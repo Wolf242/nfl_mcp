@@ -73,18 +73,23 @@ def test_the_classic_layout_still_parses_and_a_finished_week_has_everyone_starte
     assert parsers.parse_matchup("<html><body><table class='Tst-table'><tr><td>x</td></tr></table></body></html>")["layout"] is None
 
 
-def test_the_opponent_totals_are_points_so_far_plus_projections_for_players_yet_to_play(live):
+def test_the_opponent_totals_count_games_in_progress_at_yahoos_live_projection(live):
     opp, warn = checkin._opponent(live, "9", 12.0, 8)
     assert warn == [] and opp["mid"] == "5"
-    assert opp["basis"] == "points so far plus Yahoo's projections for players yet to play"
-    assert opp["my_projected_points"] == 132.15 and opp["projected_points"] == 105.8        # 30.70 + 101.45 / 2.00 + 103.80
-    assert opp["margin"] == 26.35 and opp["read"].startswith("good matchup")
+    assert opp["basis"].startswith("finished games at points, games in progress at Yahoo's live projection")
+    # Hubbard 25.05 and Golden 21.48 (their live projections, not the 16.8 and 13.9 scored so far) + 101.45 yet to play
+    assert opp["my_projected_points"] == 147.98 and opp["projected_points"] == 113.7         # McMillan 9.90 + 103.80
+    assert opp["margin"] == 34.28 and opp["read"].startswith("good matchup")
+    assert opp["counted_at_live_projection"] == {"mine": ["C. Hubbard (CAR RB)", "M. Golden (GB WR)"],
+                                                 "theirs": ["T. McMillan (CAR WR)"]}
     assert opp["pre_game_projection"] == {"mine": 133.09, "theirs": 119.6}
     assert opp["games_started"] == {"mine": 2, "theirs": 1} and opp["left_out"] is None
     assert [(x["label"], x["points"]) for x in opp["counted_as_played"]["mine"]] == [
         ("C. Hubbard (CAR RB)", 16.8), ("M. Golden (GB WR)", 13.9)]
     assert [x["label"] for x in opp["counted_as_played"]["theirs"]] == ["T. McMillan (CAR WR)"]
     assert opp["counted_as_played"]["mine"][0]["game"] == "live"
+    first = opp["counted_as_played"]["mine"][0]
+    assert (first["counted_at"], first["counted_value"], first["points"], first["live_projection"]) == ("live_projection", 25.05, 16.8, 25.05)
     assert opp["points_so_far"] == {"mine": 30.7, "theirs": 2.0}
     assert [x["label"] for x in opp["injured_starters"]] == ["G. Pickens (DAL WR)", "T. Warren (IND TE)"]
     # before anyone has played, Yahoo's own totals are used as before
@@ -96,6 +101,7 @@ def test_the_opponent_totals_are_points_so_far_plus_projections_for_players_yet_
     done = parsers.parse_matchup((FIX / "matchup.html").read_text(encoding="utf-8"))
     final, _ = checkin._opponent(done, done["home"]["team"]["mid"], 12.0, 8)
     assert final["my_projected_points"] == 99.52 and final["projected_points"] == 120.66 and final["margin"] == -21.14
+    assert final["counted_at_live_projection"] == {"mine": [], "theirs": []}                  # every game final: points
 
 
 def test_a_starter_with_no_number_is_left_out_and_named_never_silently_dropped(live):
@@ -103,7 +109,7 @@ def test_a_starter_with_no_number_is_left_out_and_named_never_silently_dropped(l
         p["projected"] = p["points"] = None
     opp, _ = checkin._opponent(live, "9", 12.0, 8)
     assert opp["left_out"] == {"mine": [], "theirs": ["K. Murray (MIN QB)", "D. Henry (BAL RB)"]}
-    assert opp["projected_points"] == round(105.8 - 20.2 - 15.91, 2)
+    assert opp["projected_points"] == round(113.7 - 20.2 - 15.91, 2)
 
 
 def test_a_page_that_gives_no_opponent_names_the_page_and_does_not_claim_a_bye():
@@ -122,9 +128,9 @@ def test_a_page_that_gives_no_opponent_names_the_page_and_does_not_claim_a_bye()
 
 
 # ------------------------------------------------------------------ 1b. the team totals while games are played
-def _starter(label, slot="WR", *, yahoo=None, ours=None, points=None, bye=False, status=None):
+def _starter(label, slot="WR", *, yahoo=None, ours=None, points=None, bye=False, status=None, live=None, state=None):
     return {"label": label, "slot": slot, "yahoo_projection": yahoo, "our_projection": ours, "started": points is not None,
-            "points_so_far": points, "on_bye": bye, "game_status": status,
+            "points_so_far": points, "on_bye": bye, "game_status": status, "live_projection": live, "game_state": state,
             "gap": round(ours - yahoo, 1) if ours is not None and yahoo is not None else None}
 
 
@@ -136,7 +142,9 @@ def test_starter_totals_count_points_so_far_for_started_players_on_both_sides_an
     assert (t["players_compared"], t["starters"]) == (4, 4)
     assert t["scope"].startswith("all 4 starters") and "Rb (BB RB) 16.8" in t["scope"] and "2 yet to play" in t["scope"]
     assert [x["label"] for x in t["counted_as_played"]] == ["Rb (BB RB)", "Wr (CC WR)"]
-    assert t["counted_as_played"][0] == {"label": "Rb (BB RB)", "points": 16.8, "status": "Half, 10-20"}
+    assert t["counted_as_played"][0] == {"label": "Rb (BB RB)", "points": 16.8, "status": "Half, 10-20",
+                                         "counted_at": "points", "counted_value": 16.8}
+    assert t["counted_at_live_projection"] == [] and t["counted_at_points"][0]["why"] == "Yahoo shows no live projection"
     assert t["counted_as_projected"] == ["Qb (AA QB)", "Te (DD TE)"] and t["not_compared"] == []
     assert "points so far" in t["basis"]
 
@@ -152,6 +160,25 @@ def test_a_total_over_part_of_the_starters_says_which_are_left_out_and_why():
                                  {"label": "Te (DD TE)", "reason": "on bye"}]
     assert t["scope"].startswith("2 of 5 starters; left out of both totals: Rb (BB RB) (no Yahoo projection)")
     assert "Te (DD TE) (on bye)" in t["scope"]
+
+
+def test_a_game_in_progress_counts_at_yahoos_live_projection_and_a_finished_one_at_points():
+    rows = [_starter("Qb (AA QB)", "QB", yahoo=18.0, ours=20.0),
+            _starter("Rb (BB RB)", "RB", points=16.8, live=25.05, status="Q3 2:11, 13-27", state="live"),
+            _starter("Wr (CC WR)", "WR", points=13.9, live=21.48, status="Final W 27-13", state="final"),
+            _starter("Te (DD TE)", "TE", points=4.0, status="Half, 10-20")]                 # in progress, no live number
+    t = compare.starter_totals(rows)
+    assert (t["yahoo"], t["ours"]) == (round(25.05 + 13.9 + 4.0 + 18.0, 1), round(25.05 + 13.9 + 4.0 + 20.0, 1))
+    how = {x["label"]: (x["counted_at"], x["counted_value"]) for x in t["counted_as_played"]}
+    assert how == {"Rb (BB RB)": ("live_projection", 25.05), "Wr (CC WR)": ("points", 13.9), "Te (DD TE)": ("points", 4.0)}
+    assert t["counted_at_live_projection"] == [{"label": "Rb (BB RB)", "points_so_far": 16.8, "live_projection": 25.05}]
+    assert {x["label"]: x["why"] for x in t["counted_at_points"]} == {
+        "Wr (CC WR)": "game final", "Te (DD TE)": "Yahoo shows no live projection"}
+    assert "1 in progress, counted at Yahoo's live projection (Rb (BB RB) 25.05, 16.8 so far)" in t["scope"]
+    assert "Wr (CC WR) 13.9" in t["scope"] and "1 yet to play" in t["scope"]
+    # a finished game ignores any live number it still carries
+    assert compare.counted_value(_starter("x", points=13.9, live=21.48, state="final")) == (13.9, "points")
+    assert compare.counted_value(_starter("x", points=13.9, live=21.48, status="Final L 17-20")) == (13.9, "points")
 
 
 @pytest.fixture
@@ -180,16 +207,19 @@ async def test_a_check_in_during_a_game_compares_totals_on_the_same_basis_and_li
     r = await checkin.build_checkin(prov, LG, "9", WEEK, compare=compare.compare_projections, now=NOW)
     t = r["roster"]["starter_totals"]
     assert (t["players_compared"], t["starters"]) == (9, 9) and t["scope"].startswith("all 9 starters")
-    assert (t["yahoo"], t["ours"]) == (132.2, 100.7)                                   # 30.7 + 101.45 / 30.7 + 7 * 10.0
+    assert (t["yahoo"], t["ours"]) == (148.0, 116.5)           # 25.05 + 21.48 live + 101.45 / the same + 7 * 10.0
     assert [x["label"] for x in t["counted_as_played"]] == ["Chuba Hubbard (CAR RB)", "Matthew Golden (GB WR)"]
+    assert [(x["label"], x["live_projection"]) for x in t["counted_at_live_projection"]] == [
+        ("Chuba Hubbard (CAR RB)", 25.05), ("Matthew Golden (GB WR)", 21.48)]
+    assert "2 in progress, counted at Yahoo's live projection" in t["scope"]
     hubbard = next(p for p in r["roster"]["slots"] if p["name"] == "Chuba Hubbard")
     assert hubbard["started"] and hubbard["points_so_far"] == 16.8 and hubbard["yahoo_projection"] is None
     w = next(x for x in r["warnings"] if x.startswith("Team projection gap"))
-    assert "all 9 starters" in w and "Chuba Hubbard (CAR RB) 16.8" in w and "yet to play" in w
+    assert "all 9 starters" in w and "Chuba Hubbard (CAR RB) 25.05, 16.8 so far" in w and "yet to play" in w
     o = r["opponent"]
     assert o is not None and o["mid"] == "5" and o["games_started"] == {"mine": 2, "theirs": 1}
-    assert o["my_projected_points"] == 132.15 and o["projected_points"] == 105.8
-    assert o["my_total_nfl_mcp"]["total"] == 100.7 and o["my_total_nfl_mcp"]["scope"].startswith("all 9 starters")
+    assert o["my_projected_points"] == 147.98 and o["projected_points"] == 113.7
+    assert o["my_total_nfl_mcp"]["total"] == 116.5 and o["my_total_nfl_mcp"]["scope"].startswith("all 9 starters")
     assert [x["label"] for x in o["injured_starters"]] == ["George Pickens (DAL WR)", "Tyler Warren (IND TE)"]   # full names by id
     assert [x["label"] for x in o["counted_as_played"]["mine"]] == ["Chuba Hubbard (CAR RB)", "M. Golden (GB WR)"]
     assert any("partly played" in x for x in r["warnings"])

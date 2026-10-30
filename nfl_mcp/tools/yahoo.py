@@ -186,7 +186,10 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
       the starters' team total (a team gap under 12 points is noise)
     - problems: starters on bye, empty slots, starters tagged O/D, IR-slot players whose tag is not
       IR-eligible, a full bench
-    - wire: FA / W (date) tags at each position with a bye hole or a problem, each candidate
+    - wire: FA / W (date) tags at each position with a bye hole or a problem, and always at QB,
+      TE, K and DEF (`positions_read` says why each was read; `starter_checks` sets the best free
+      agent at each against your starter there, and every free agent who projects above a starter is
+      a target even inside the noise, flagged `inside_noise`), each candidate
       projected and ranked with its upgrade over what it replaces, when claims clear, vs_bench
       (each flagged starter's bench replacements compared with the best wire pickup first, both
       limited to the slot he occupies: inside a 1.5-point tie the answer is "no add needed, use
@@ -213,10 +216,12 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
       or whose sources disagree (one inside the band, another outside it, or on who leads), with every
       source's gap: a toss-up or an unclear call, never a pick; compare_players takes it from there
     - opponent: both totals, the margin and its reading (a "good matchup" only outside the noise
-      band), injured starters, starters on bye. While games are being played a total is "points so
-      far plus Yahoo's projections for players yet to play" (`basis`), with `counted_as_played`
-      naming the starters counted at their points; `roster.starter_totals` does the same for
-      Yahoo and nfl_mcp and its `scope` says which starters it covers. If the matchup page gives
+      band), injured starters, starters on bye. While games are being played a finished game
+      counts at its points, a game in progress at Yahoo's live projection (points so far plus the
+      rest of the game) when Yahoo shows one, and a game yet to play at the projection (`basis`);
+      `counted_as_played` names how each started starter was counted and `counted_at_live_projection`
+      who was counted at the live number. `roster.starter_totals` does the same for Yahoo and
+      nfl_mcp and its `scope` says which starters it covers. If the matchup page gives
       no opponent the warning names the page and says its layout may have changed (never a bye)
     - byes: the next four weeks: which starters are out (full names), the active players at each
       position against its own slots (QB 1, RB 2, WR 2, TE 1, K 1, DEF 1; thin when fewer), the
@@ -230,8 +235,8 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
       IR record Yahoo does not show, or one older than the player's activation, never makes him Out).
       Each has a statement to quote: "stored report (dated X, stale: ...) says ...", or, when a
       newer post names him, a labelled single-source lead
-    - news: reporter posts naming your players, each a lead; player quotes and predictions are
-      dropped first, and posts relayed by one aggregator account count as one independent origin
+    - news: reporter posts naming your players, each a lead; player quotes, predictions and posts
+      that only report a score or touchdown are dropped first (listed in news.dropped), and posts relayed by one aggregator account count as one independent origin
     - warnings: anything single-source or unverified
     Every player is printed as "Full Name (TEAM POS)" and keyed internally on the player id.
     Yahoo's projections are shown for comparison only and never feed nfl_mcp's own.
