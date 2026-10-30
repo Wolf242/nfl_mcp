@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Check-in while games are being played.** Yahoo's live matchup page (two script-drawn tables, abbreviated names) gave no opponent and
+  an incomplete roster total. The browser source now waits for the lineup, `parse_matchup` reads both layouts, and team totals are
+  "points so far plus projections for players yet to play" for Yahoo and nfl_mcp, naming the starters counted at points and saying which
+  starters a total covers. With no opponent the check-in names the page, says its layout may have changed, and does not claim a bye.
+- **ESPN's comment is shown beside each stored injury**, and an Out whose comment says the player was activated or is practicing is
+  flagged "status may be stale despite its date". A body part that is a status word is ignored ("body part unknown").
+
 ### Added
 
 - **Roster-page gap-fill for capped injury lists.** After the fast team-list crawl, each team at

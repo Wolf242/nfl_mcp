@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
 
+from . import injury_status
 from .nflverse_files import norm_person
 from .scoring import LeagueScoring, ScoringModel
 from .yahoo import checkin as ck
@@ -436,7 +437,10 @@ def injury_record(p: dict, who: str, now: datetime, week_start: date | None) -> 
     stamp, basis = ck.injury_record_date(p)
     return {"player": who, "yahoo_tag": p.get("injury"), "status": status, "source": p.get("nfl_injury_source"),
             "practice": p.get("practice_status"), "practice_date": p.get("nfl_practice_date"),
-            "body_part": p.get("nfl_injury_body_part"), "report_date": p.get("nfl_injury_report_date"),
+            "body_part": injury_status.body_part(p.get("nfl_injury_body_part"))[0],
+            "body_part_unknown": bool(injury_status.body_part(p.get("nfl_injury_body_part"))[1]
+                                      or p.get("nfl_injury_body_part_unknown")),
+            "comment": p.get("nfl_injury_comment"), "report_date": p.get("nfl_injury_report_date"),
             "stored_at": p.get("nfl_injury_stored_at"), "date_used": stamp, "date_basis": basis,
             "flags": flags, "stale_reasons": reasons, "statement": ck.injury_statement(p, reasons)}
 
@@ -466,7 +470,9 @@ def defense_injuries(records: list[dict], snaps: list[dict] | None, team: str, w
             except ValueError:
                 sources = [sources]
         p = {"nfl_injury_status": status, "nfl_injury_source": "both" if len(sources) > 1 else "report",
-             "nfl_injury_body_part": r.get("injury_type"), "nfl_injury_report_date": r.get("date_reported"),
+             "nfl_injury_body_part": r.get("injury_type"),
+             "nfl_injury_comment": None if "espn_roster" in sources else r.get("injury_description"),
+             "nfl_injury_report_date": r.get("date_reported"),
              "nfl_injury_stored_at": r.get("updated_at")}
         rec = injury_record(p, f"{r.get('player_name')} ({team} {r.get('position') or 'DEF'})", now, week_start)
         rec["defense_snap_pct"] = _pct(share)
@@ -721,6 +727,8 @@ async def compare_players(player_a: str, player_b: str, *, season: int, week: in
         rec_in = {"injury": (mine or {}).get("injury"), "nfl_injury_status": pr.get("injury_status"),
                   "nfl_injury_source": pr.get("injury_source"), "practice_status": pr.get("practice_status"),
                   "nfl_practice_date": stored.get("practice_date"), "nfl_injury_body_part": stored.get("body_part"),
+                  "nfl_injury_body_part_unknown": stored.get("body_part_unknown"),
+                  "nfl_injury_comment": stored.get("comment"),
                   "nfl_injury_report_date": stored.get("report_date"), "nfl_injury_stored_at": stored.get("stored_at"),
                   "slot": (mine or {}).get("slot"), "yahoo_known": mine is not None}
         opp = ctx[i].get("opponent")

@@ -212,8 +212,12 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
       nfl_mcp, model, Sleeper and Yahoo, as compare_players takes it) is inside the 1.5-point tie band,
       or whose sources disagree (one inside the band, another outside it, or on who leads), with every
       source's gap: a toss-up or an unclear call, never a pick; compare_players takes it from there
-    - opponent: projected points, margin and its reading (a "good matchup" only outside the
-      noise band), injured starters, starters on bye
+    - opponent: both totals, the margin and its reading (a "good matchup" only outside the noise
+      band), injured starters, starters on bye. While games are being played a total is "points so
+      far plus Yahoo's projections for players yet to play" (`basis`), with `counted_as_played`
+      naming the starters counted at their points; `roster.starter_totals` does the same for
+      Yahoo and nfl_mcp and its `scope` says which starters it covers. If the matchup page gives
+      no opponent the warning names the page and says its layout may have changed (never a bye)
     - byes: the next four weeks: which starters are out (full names), the active players at each
       position against its own slots (QB 1, RB 2, WR 2, TE 1, K 1, DEF 1; thin when fewer), the
       flex as a separate line ("flex: N eligible players left across RB/WR/TE"), and flags

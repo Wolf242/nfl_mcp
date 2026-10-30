@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from .. import injury_status
 from ..teams import normalize_team
 from .idmap import norm_name, norm_team, player_key, player_label
 from .parsers import IR_ELIGIBLE
@@ -39,6 +40,7 @@ NOISE_BAND_POINTS = 12.0
 NOISE_FLOOR_POINTS = 10.0
 # Two single players closer than this are a tie: the projections cannot tell them apart.
 PLAYER_TIE_POINTS = 1.5
+COMMENT_SHOWN_CHARS = 400  # ESPN's comment is quoted to this length; the full text stays in the row
 NO_ESPN_REPORT = "no ESPN report found (list capped)"  # a player neither ESPN's capped list nor its roster page settled
 STALE_INJURY_DAYS = 3  # a stored injury report older than this (or from before this NFL week) is not current
 EDGE_BAND_POINTS = 1.0  # a margin this close to the noise band is "at the edge" of it
@@ -283,7 +285,8 @@ def injury_flags(p: dict, refresh_stale: bool = False, now: datetime | None = No
     Yahoo shows a tag and nfl_mcp has no report at all. ``season_long_status``: nfl_mcp has a PUP, NFI
     or IR record that Yahoo does not show. ``predates_activation``: nfl_mcp has a record but Yahoo
     shows the player active, and the record is season-long or old, so it was written before he came
-    back. Neither of the last two can make a player Out or project 0.
+    back. Neither of the last two can make a player Out or project 0. ``status_may_be_stale``: the
+    record says Out but ESPN's own comment on it says he was activated or is practicing.
     """
     y, status = p.get("injury"), p.get("nfl_injury_status")
     if not (y or status):
@@ -303,6 +306,8 @@ def injury_flags(p: dict, refresh_stale: bool = False, now: datetime | None = No
     dated = [r for r in reasons if not r.startswith("the injury refresh")]
     if known and status and not y and p.get("slot") != "IR" and (n in SEASON_LONG_TAGS or dated):
         flags.append("predates_activation")
+    if n == "O" and injury_status.comment_contradicts_out(p.get("nfl_injury_comment")):
+        flags.append("status_may_be_stale")
     return flags
 
 
@@ -315,13 +320,24 @@ def injury_statement(p: dict, reasons: list[str]) -> str:
     if p.get("practice_status"):
         bits.append(f"practice {p['practice_status']}"
                     + (f" (dated {str(p['nfl_practice_date'])[:10]})" if p.get("nfl_practice_date") else ""))
-    if p.get("nfl_injury_body_part"):
-        bits.append(p["nfl_injury_body_part"])
+    part, unknown = injury_status.body_part(p.get("nfl_injury_body_part"))
+    if part:
+        bits.append(part)
+    elif unknown or p.get("nfl_injury_body_part_unknown"):
+        bits.append("body part unknown")
     stamp, _ = injury_record_date(p)
     when = f"dated {stamp[:10]}" if stamp else "undated"
     if reasons:
-        return f"stored report ({when}, stale: {'; '.join(reasons)}) says {', '.join(bits)}"
-    return f"nfl_mcp report ({when}) says {', '.join(bits)}"
+        text = f"stored report ({when}, stale: {'; '.join(reasons)}) says {', '.join(bits)}"
+    else:
+        text = f"nfl_mcp report ({when}) says {', '.join(bits)}"
+    comment = (p.get("nfl_injury_comment") or "").strip()
+    if comment:
+        shown = comment if len(comment) <= COMMENT_SHOWN_CHARS else comment[:COMMENT_SHOWN_CHARS].rstrip() + "..."
+        text += f"; ESPN's comment: \"{shown}\""
+        if nfl_tag(status) == "O" and injury_status.comment_contradicts_out(comment):
+            text += " (status may be stale despite its date)"
+    return text
 
 
 def projection_unknown(p: dict) -> str | None:
@@ -403,8 +419,11 @@ def verify_roster(players: list[dict], week: int, schedules: dict[int, dict | No
                     + (f" ({p['nfl_injury_source']})" if p.get("nfl_injury_source") and n else "")]
             if p.get("practice_status"):
                 bits.append(f"practice: {p['practice_status']}")
-            if p.get("nfl_injury_body_part"):
-                bits.append(f"body part: {p['nfl_injury_body_part']}")
+            part, unknown = injury_status.body_part(p.get("nfl_injury_body_part"))
+            if part:
+                bits.append(f"body part: {part}")
+            elif unknown or p.get("nfl_injury_body_part_unknown"):
+                bits.append("body part unknown")
             if p.get("gameday_status"):
                 bits.append(f"game day: {p['gameday_status']}")
             if differ:
@@ -416,7 +435,8 @@ def verify_roster(players: list[dict], week: int, schedules: dict[int, dict | No
             injuries.append({"key": p.get("key"), "name": p["name"], "label": label_of(p), "slot": p["slot"],
                              "yahoo_tag": y, "nfl_mcp_status": p.get("nfl_injury_status"),
                              "practice": p.get("practice_status"), "practice_date": p.get("nfl_practice_date"),
-                             "body_part": p.get("nfl_injury_body_part"),
+                             "body_part": part, "body_part_unknown": bool(unknown or p.get("nfl_injury_body_part_unknown")),
+                             "comment": p.get("nfl_injury_comment"),
                              "report_date": p.get("nfl_injury_report_date"), "stored_at": p.get("nfl_injury_stored_at"),
                              "date_used": stamp, "date_basis": basis, "stale_reasons": reasons,
                              "gameday": p.get("gameday_status"), "verdict": verdict,
@@ -465,6 +485,9 @@ def verification_warnings(verify: dict) -> list[str]:
             out.append(f"Injury tag conflict for {who}: {r['detail']}. Check the team report before deciding.")
         elif r["verdict"] == "other_only":
             out.append(f"{who}: nfl_mcp has an injury report ({r['nfl_mcp_status']}) but Yahoo shows no tag.")
+        if "status_may_be_stale" in r.get("flags", []):
+            out.append(f"{who}: the stored status is Out, but ESPN's comment on it says he was activated or is practicing; "
+                       "status may be stale despite its date. Check the team report.")
         if "predates_activation" in r.get("flags", []) or "season_long_status" in r.get("flags", []):
             out.append(f"{who}: the {r['statement']}. That is a season-long status or a record older than his "
                        "activation, so it is ignored: it creates no Out and no 0 projection.")
@@ -966,22 +989,99 @@ def matchup_read(margin: float | None, band: float) -> str | None:
     return f"tough matchup: projected behind by {-margin:.1f}, outside the +/-{band:g} noise band"
 
 
-def _opponent(matchup: dict, mid: str, band: float = NOISE_BAND_POINTS) -> tuple[dict | None, list[str]]:
+def _totals_scope(totals: dict) -> str:
+    """Which starters a comparison total covers (always said; a partial total is never given without it)."""
+    return totals.get("scope") or (
+        f"all {totals['starters']} starters" if totals.get("players_compared") == totals.get("starters")
+        else f"{totals.get('players_compared')} of {totals.get('starters')} starters")
+
+
+def _full_names(prov, matchup: dict) -> None:
+    """The live matchup page abbreviates names ("C. Hubbard"): swap in the full name by Yahoo id where the provider knows it."""
+    lookup = getattr(prov, "full_name", None)
+    if lookup is None:
+        return
+    for side in (matchup.get("home") or {}, matchup.get("away") or {}):
+        for key in ("starters", "bench"):
+            for p in side.get(key) or []:
+                if p.get("name_abbreviated"):
+                    try:
+                        full = lookup(p)
+                    except Exception:
+                        full = None
+                    if full:
+                        p["name"], p["name_abbreviated"] = full, False
+
+
+def side_total(starters: list[dict]) -> dict:
+    """One side of the matchup page as "points so far plus Yahoo's projections for players yet to play".
+
+    A starter whose game has started counts for his points so far (``counted_as_played``, each with his game's
+    state); every other starter counts for Yahoo's projection. A starter with neither number is listed in
+    ``no_number`` and left out. When no game has started the total is Yahoo's own pre-game total.
+    """
+    rows = [p for p in starters if not p.get("empty") and p.get("name")]
+    played = [p for p in rows if p.get("points") is not None]
+    ahead = [p for p in rows if p.get("points") is None and p.get("projected") is not None]
+    none = [p for p in rows if p.get("points") is None and p.get("projected") is None]
+    so_far = round(sum(p["points"] for p in played), 2)
+    remaining = round(sum(p["projected"] for p in ahead), 2)
+    return {
+        "points_so_far": so_far, "projected_yet_to_play": remaining, "total": round(so_far + remaining, 2),
+        "starters": len(rows), "started": len(played), "yet_to_play": len(ahead),
+        "counted_as_played": [{"label": label_of(p), "points": p["points"],
+                               "game": ((p.get("game") or {}).get("state") or "started")} for p in played],
+        "no_number": [label_of(p) for p in none],
+    }
+
+
+def matchup_page_problem(matchup: dict, mid: str, week: int | None) -> str:
+    """The sentence for a matchup page that gave no opponent. It names the page and says the layout may have
+    changed; it never says "bye", because nothing on a page that could not be read says so."""
+    where = f"the Yahoo matchup page (/matchup?week={week if week is not None else '<week>'}&mid1={mid})"
+    sides = [matchup.get("home") or {}, matchup.get("away") or {}]
+    if not any(s.get("starters") for s in sides) and not any(s.get("total_proj") is not None for s in sides):
+        what = "no lineup table could be read from it"
+    elif not all(s.get("team") for s in sides):
+        what = "the lineups were read but the two teams could not be identified"
+    else:
+        what = "your team was not one of the two teams on it"
+    return (f"No opponent could be found: {what} on {where}, so the page layout may have changed. "
+            "That is not a bye week; the opponent comparison is left out until the page can be read.")
+
+
+def _opponent(matchup: dict, mid: str, band: float = NOISE_BAND_POINTS,
+              week: int | None = None) -> tuple[dict | None, list[str]]:
     sides = [matchup.get("home") or {}, matchup.get("away") or {}]
     mine = next((s for s in sides if (s.get("team") or {}).get("mid") == str(mid)), None)
     theirs = next((s for s in sides if s is not mine and s.get("team")), None)
-    if mine is None or theirs is None:
-        return None, ["No opponent found on the matchup page for this week (a bye week, or the page changed)."]
+    lineups = any(s.get("starters") for s in sides) or any(s.get("total_proj") is not None for s in sides)
+    if mine is None or theirs is None or not lineups:
+        return None, [matchup_page_problem(matchup, mid, week)]
     injured = [{"name": p["name"], "label": label_of(p), "slot": p.get("slot"), "tag": p["injury"]}
                for p in theirs["starters"] if p.get("injury") and not p.get("empty")]
     byes = [label_of(p) for p in theirs["starters"] if (p.get("game") or {}).get("bye")]
-    theirs_pts, mine_pts = theirs.get("total_proj"), mine.get("total_proj")
-    margin = (round(mine_pts - theirs_pts, 2)
-              if isinstance(theirs_pts, (int, float)) and isinstance(mine_pts, (int, float)) else None)
+    my_side, their_side = side_total(mine["starters"]), side_total(theirs["starters"])
+    mine_pts, theirs_pts = mine.get("total_proj"), theirs.get("total_proj")
+    started = my_side["started"] + their_side["started"]
+    # Nothing played yet: Yahoo's own totals. Otherwise points so far plus what is yet to be played, both sides.
+    my_total = my_side["total"] if started or mine_pts is None else mine_pts
+    their_total = their_side["total"] if started or theirs_pts is None else theirs_pts
+    margin = round(my_total - their_total, 2)
+    partial = bool(my_side["no_number"] or their_side["no_number"])
     return {
         "team": theirs["team"]["name"], "mid": theirs["team"]["mid"],
-        "projected_points": theirs_pts, "my_projected_points": mine_pts,
+        "projected_points": their_total, "my_projected_points": my_total,
         "margin": margin, "noise_band": band, "read": matchup_read(margin, band),
+        "basis": ("points so far plus Yahoo's projections for players yet to play" if started
+                  else "Yahoo's pre-game projections"),
+        "games_started": {"mine": my_side["started"], "theirs": their_side["started"]},
+        "counted_as_played": {"mine": my_side["counted_as_played"], "theirs": their_side["counted_as_played"]},
+        "points_so_far": {"mine": my_side["points_so_far"], "theirs": their_side["points_so_far"]},
+        "left_out": {"mine": my_side["no_number"], "theirs": their_side["no_number"]} if partial else None,
+        "pre_game_projection": {"mine": mine_pts, "theirs": theirs_pts},
+        "note": ("Yahoo's projections for both sides; nfl_mcp has no projection for the opponent's players, so the "
+                 "margin is Yahoo against Yahoo (your own nfl_mcp total is in my_total_nfl_mcp)."),
         "injured_starters": injured, "starters_on_bye": byes,
     }, []
 
@@ -1291,7 +1391,8 @@ async def build_checkin(
             warnings.append(f"{p['label']}: {p['projection_unknown']}. He is not ranked on projection.")
     totals = cmp["starter_totals"]
     noise = abs(totals["gap"]) < band
-    warnings.append(f"Team projection gap {totals['gap']:+.1f} (ours {totals['ours']} vs Yahoo {totals['yahoo']}) "
+    warnings.append(f"Team projection gap {totals['gap']:+.1f} (ours {totals['ours']} vs Yahoo {totals['yahoo']}; "
+                    f"{_totals_scope(totals)}) "
                     + (f"is under {band:g} team points: noise, not a reason to change a lineup."
                        if noise else f"is {band:g}+ team points: worth finding out why they disagree."))
     model_only = [p["label"] for p in cmp["players"] if p["projection_source"] == "model_only" and not p["on_bye"]]
@@ -1392,9 +1493,21 @@ async def build_checkin(
 
     opponent, opp_warn = None, []
     try:
-        opponent, opp_warn = _opponent(await prov.data.matchup(week, mid), mid, band)
+        matchup = await prov.data.matchup(week, mid)
+        _full_names(prov, matchup)
+        opponent, opp_warn = _opponent(matchup, mid, band, week)
+        if opponent is not None:
+            opponent["my_total_nfl_mcp"] = {
+                "total": totals["ours"], "scope": _totals_scope(totals),
+                "counted_as_played": totals.get("counted_as_played") or [], "basis": totals.get("basis")}
+            if opponent["games_started"]["mine"] or opponent["games_started"]["theirs"]:
+                opp_warn.append(
+                    f"The matchup is partly played ({opponent['games_started']['mine']} of your starters and "
+                    f"{opponent['games_started']['theirs']} of theirs have started): totals are points so far plus Yahoo's "
+                    "projections for players yet to play, so the margin will move.")
     except Exception as e:
-        opp_warn = [f"Could not read the matchup page: {e}"]
+        opp_warn = [f"Could not read the Yahoo matchup page (/matchup?week={week}&mid1={mid}): {e}. "
+                    "The page layout may have changed; this is not a bye week."]
     warnings += opp_warn
 
     news = {"items": [], "count": 0, "dropped": [], "independent_origins": 0, "origins": [], "by_player": {}}

@@ -31,6 +31,11 @@ class YahooBlocked(RuntimeError):
     """
 
 
+LINEUP_WAIT_MS = 15000
+# True once the matchup page has its lineups: the classic table ids, or the live layout's tables headed "Fan Pts".
+LINEUP_READY_JS = ("() => !!document.getElementById('statTable1') || "
+                   "Array.from(document.querySelectorAll('table')).filter(t => t.innerText.includes('Fan Pts') "
+                   "&& t.innerText.includes('Proj')).length >= 2")
 BLOCK_COOLDOWN = 600.0
 BLOCK_STATUSES = (999, 429)
 
@@ -109,6 +114,15 @@ class BrowserSource:
                     self.profile_dir, headless=self.headless)
         return self._ctx
 
+    async def _await_lineup(self, pg) -> bool:
+        """Wait (bounded) for the matchup page's lineup tables. The live-game layout is drawn by script after the
+        document loads, so reading the page at once finds only the header; the classic layout is already there."""
+        try:
+            await pg.wait_for_function(LINEUP_READY_JS, timeout=LINEUP_WAIT_MS)
+            return True
+        except Exception:  # the parser reports a page with no lineup; do not fail the fetch
+            return False
+
     async def fetch(self, league: str, page: str, **params) -> str:
         url = check_read_only(page_url(league, page, **params), league_id=league)
         hit = self._cache.get(url)
@@ -132,6 +146,8 @@ class BrowserSource:
                         "Yahoo session expired - run `python -m nfl_mcp.yahoo.login` and sign in")
                 # a final guard on where we actually landed
                 check_read_only(pg.url, league_id=league)
+                if page == "matchup":
+                    await self._await_lineup(pg)
                 html = await pg.content()
             finally:
                 await pg.close()

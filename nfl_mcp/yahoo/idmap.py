@@ -35,6 +35,8 @@ class IdMap:
         self.by_yahoo: dict[str, str] = {}
         self.by_name: dict[tuple[str, str | None, str | None], list[str]] = {}
         self.names: dict[str, str] = {}
+        # first initial + surname + team + position -> ids, to expand "C. Hubbard" when no Yahoo id maps
+        self.by_initial: dict[tuple[str, str, str | None, str | None], list[str]] = {}
         for sid, p in (sleeper_players or {}).items():
             if not isinstance(p, Mapping):
                 continue
@@ -46,6 +48,9 @@ class IdMap:
                 self.names[str(sid)] = full
                 key = (norm_name(full), norm_team(p.get("team")), (p.get("position") or None))
                 self.by_name.setdefault(key, []).append(str(sid))
+                first, _, rest = full.strip().partition(" ")
+                if first and rest:
+                    self.by_initial.setdefault((first[0].lower(), norm_name(rest), key[1], key[2]), []).append(str(sid))
 
     def resolve(self, yahoo_id: str | None, name: str | None, team: str | None,
                 position: str | None) -> tuple[str | None, str]:
@@ -62,6 +67,16 @@ class IdMap:
             if len(hits) == 1:
                 return hits[0], "name"
         return None, "unmapped"
+
+    def expand(self, name: str | None, team: str | None, position: str | None) -> str | None:
+        """The full name for an abbreviated one ("C. Hubbard") when exactly one player on that team and position has
+        that first initial and surname; None otherwise."""
+        m = re.match(r"^([A-Za-z])\.\s+(.+)$", (name or "").strip())
+        if not m:
+            return None
+        pos = (position or "").upper().split("/")[0] or None
+        hits = self.by_initial.get((m.group(1).lower(), norm_name(m.group(2)), norm_team(team), pos)) or []
+        return self.names.get(hits[0]) if len(hits) == 1 else None
 
 
 def player_label(name: str | None, team: str | None, position: str | None) -> str:

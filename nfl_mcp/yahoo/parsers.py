@@ -12,6 +12,11 @@ Observed layout (football.fantasysports.yahoo.com/f1/<league>/...):
   is a write action - the parser reads the id out of it and never follows it.**
 * Matchup ``/matchup``: ``table#statTable1`` starters, ``#statTable2`` bench; one row holds
   both teams: ``[stats][my player][proj][pts][pos][pos][pos][pts][proj][their player][stats]``.
+  While games are being played (seen 2026-10-29) Yahoo serves another layout, rendered by script: two
+  unnamed tables headed ``Stats | Player | Proj | Fan Pts | Pos | Fan Pts | Proj | Player | Stats``, the
+  player's id in ``data-ys-playerid``, an abbreviated name ("C. Hubbard"), and for a player whose game has
+  started the points so far in ``Fan Pts`` and two numbers in ``Proj`` (the pre-game projection, then
+  Yahoo's live one). :func:`parse_matchup` reads both.
 * Standings ``/``: the waiver order is the ``Waiver`` column; see :func:`parse_standings`.
 """
 from __future__ import annotations
@@ -192,11 +197,95 @@ def _matchup_player(cell) -> dict:
     return _player_from_cell(cell)
 
 
+_LIVE_HEAD = ["stats", "player", "proj", "fan pts", "pos", "fan pts", "proj", "player", "stats"]
+_NUM = re.compile(r"-?\d+(?:\.\d+)?")
+_GAME_SCHEDULED = re.compile(r"^(?P<when>[A-Za-z]{3}\s+\d{1,2}:\d{2}\s*[AP]M)\s*(?P<ha>@|vs)\s*(?P<opp>[A-Za-z]{2,4})$", re.I)
+_GAME_OPPONENT = re.compile(r"(?P<ha>@|vs)\s*(?P<opp>[A-Za-z]{2,4})\s*$", re.I)
+
+
+def _live_numbers(cell) -> tuple[float | None, float | None]:
+    """The numbers in a ``Proj`` cell: the pre-game projection, then (once the game has started) Yahoo's live one."""
+    nums = _NUM.findall(_text(cell))
+    return (float(nums[0]) if nums else None), (float(nums[1]) if len(nums) > 1 else None)
+
+
+def _live_game(cell) -> dict | None:
+    """The game line under a player: scheduled ("Sun 1:00 PM @ NYJ"), in progress ("2nd 0:00, 10-20 @ GB"), final,
+    or "No Game" (a bye)."""
+    a = cell.select_one('a[href*="boxscore"]')
+    if a is None:
+        if "no game" in _text(cell).lower():
+            return {"kickoff": None, "home": None, "opponent": None, "bye": True, "state": "no game"}
+        return None
+    text = _text(a)
+    m = _GAME_SCHEDULED.match(text)
+    if m:
+        return {"kickoff": m.group("when"), "home": m.group("ha").lower() == "vs", "opponent": m.group("opp").upper(),
+                "state": "scheduled"}
+    o = _GAME_OPPONENT.search(text)
+    return {"kickoff": None, "home": (o.group("ha").lower() == "vs") if o else None,
+            "opponent": o.group("opp").upper() if o else None,
+            "state": "final" if "final" in text.lower() else "live", "status": text}
+
+
+def _live_player(cell) -> dict:
+    """A player cell of the live layout: id from ``data-ys-playerid``, abbreviated name, ``TEAM - POS``, injury badge."""
+    if _text(cell).lower().startswith("(empty)") or not _text(cell):
+        return {"yahoo_id": None, "name": None, "team": None, "position": None, "injury": None, "game": None, "empty": True}
+    name_a = next((a for a in cell.select("a.playernote[data-ys-playerid]") if _text(a)), None)
+    team = pos = None
+    for sp in cell.find_all("span"):
+        m = _TEAM_POS.match(_text(sp))
+        if m:
+            team, pos = m.group(1).upper(), m.group(2)
+            break
+    inj = next((_text(ab) for ab in cell.find_all("abbr") if _text(ab) in INJURY_TAGS), None)
+    name = _text(name_a) if name_a is not None else None
+    return {"yahoo_id": name_a.get("data-ys-playerid") if name_a is not None else None, "name": name,
+            "name_abbreviated": bool(name and re.match(r"^[A-Z]\.\s", name)), "team": team, "position": pos,
+            "injury": inj, "game": _live_game(cell)}
+
+
+def _parse_matchup_live(soup, sides) -> bool:
+    """Fill ``sides`` from the live layout's two lineup tables; whether they were found."""
+    tables = []
+    for t in soup.find_all("table"):
+        head = t.select_one("tr")
+        if head is not None and [_text(c).lower() for c in head.find_all(["th", "td"], recursive=False)] == _LIVE_HEAD:
+            tables.append(t)
+    for t, key in zip(tables[:2], ("starters", "bench")):
+        for tr in t.select("tr"):
+            cells = tr.find_all("td", recursive=False)
+            if len(cells) != 9:
+                continue
+            pos = _text(cells[4])
+            if pos.lower() == "total":
+                if key == "starters":
+                    sides[0]["total_proj"], sides[0]["total_pts"] = _float(_text(cells[2])), _float(_text(cells[3]))
+                    sides[1]["total_pts"], sides[1]["total_proj"] = _float(_text(cells[5])), _float(_text(cells[6]))
+                continue
+            for i, (pc, proj, pts, stats) in enumerate(((cells[1], cells[2], cells[3], cells[0]),
+                                                         (cells[7], cells[6], cells[5], cells[8]))):
+                p = _live_player(pc)
+                projected, live = _live_numbers(proj)
+                points = _float(_text(pts))
+                p.update(slot=pos, projected=projected, live_projection=live, points=points,
+                         started=points is not None, stats=_text(stats) or None)
+                sides[i][key].append(p)
+    return bool(tables)
+
+
 def parse_matchup(html: str) -> dict:
-    """Matchup page -> ``{"home": {...}, "away": {...}}`` (``home`` = the page's left team)."""
+    """Matchup page -> ``{"home": {...}, "away": {...}, "layout": ...}`` (``home`` = the page's left team).
+
+    Each player has ``projected`` (pre-game), ``points`` (so far; None before his game) and ``started``. Both
+    layouts are read (see the module notes); ``layout`` is ``classic``, ``live`` or None when no lineup table was
+    found, which the caller must report as a page it could not read, never as a bye.
+    """
     soup = BeautifulSoup(html, "lxml")
     sides = ({"starters": [], "bench": [], "total_proj": None, "total_pts": None},
              {"starters": [], "bench": [], "total_proj": None, "total_pts": None})
+    layout = None
     for tid, key in (("statTable1", "starters"), ("statTable2", "bench")):
         t = soup.find(id=tid)
         if t is None:
@@ -218,8 +307,12 @@ def parse_matchup(html: str) -> dict:
             left.update(slot=pos, projected=_float(_text(cells[2])), points=_float(_text(cells[3])))
             right.update(slot=_text(cells[6]) or pos, projected=_float(_text(cells[8])),
                          points=_float(_text(cells[7])))
+            left["started"], right["started"] = left["points"] is not None, right["points"] is not None
             sides[0][key].append(left)
             sides[1][key].append(right)
+            layout = "classic"
+    if layout is None and _parse_matchup_live(soup, sides):
+        layout = "live"
     teams, seen = [], set()
     for a in soup.find_all("a", href=_TEAM_HREF):
         txt = _text(a)
@@ -229,7 +322,7 @@ def parse_matchup(html: str) -> dict:
             teams.append({"mid": mid, "name": txt})
     sides[0]["team"] = teams[0] if len(teams) > 0 else None
     sides[1]["team"] = teams[1] if len(teams) > 1 else None
-    return {"home": sides[0], "away": sides[1]}
+    return {"home": sides[0], "away": sides[1], "layout": layout}
 
 
 _LOWER_N = re.compile(r"Lower waiver priority:\s*(\d+)")

@@ -114,8 +114,18 @@ class YahooProvider:
             sid, _ = self._sid(s)
             out.append({"slot": slot_label(s["slot"]), "name": s.get("name"), "team": s.get("team"),
                         "position": s.get("position"), "player_id": sid, "injury": s.get("injury"),
-                        "yahoo_projection": s.get("projected"), "bye_week": s.get("bye")})
+                        "yahoo_projection": s.get("projected"), "bye_week": s.get("bye"),
+                        # once his game has started Yahoo shows the points so far instead of a projection
+                        "fantasy_points": s.get("fantasy_points"), "game": s.get("game")})
         return out
+
+    def full_name(self, p: dict) -> str | None:
+        """The full name for a player row whose name the page abbreviates ("C. Hubbard"): by Yahoo id, else by first
+        initial, surname, team and position when only one player fits; None if unknown."""
+        sid, how = self._sid(p)
+        if sid and how != "dst" and self.ids.names.get(sid):
+            return self.ids.names[sid]
+        return self.ids.expand(p.get("name"), p.get("team"), p.get("position"))
 
     async def get_rosters(self) -> list[dict]:
         out = []

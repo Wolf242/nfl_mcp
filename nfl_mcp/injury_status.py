@@ -17,6 +17,7 @@ classify a status string.
 
 from __future__ import annotations
 
+import re
 from typing import NamedTuple, cast
 
 
@@ -209,3 +210,46 @@ def severity_map() -> dict[str, int]:
     for spelling in ("Reserve/PUP", "Reserve/NFI", "Reserve/COVID-19", "Day-To-Day"):
         out.setdefault(spelling, STATUS_TABLE[cast(str, normalize(spelling))].severity)
     return out
+
+
+# A "body part" that is really a status (a feed put the designation in the wrong field), or the marker for none.
+BODY_PART_STATUS_WORDS = frozenset({
+    "active", "inactive", "questionable", "out", "doubtful", "probable", "unknown", "none", "n/a", "na",
+    "ir", "injured reserve", "pup", "nfi", "suspension", "suspended", "day-to-day", "day to day"})
+
+
+def body_part(raw: str | None) -> tuple[str | None, bool]:
+    """``(body part, unknown)``: the value when it names a body part; ``(None, True)`` when a value was given but is a
+    status word ("active", "out", ...) or "unknown"; ``(None, False)`` when there was none."""
+    text = (raw or "").strip()
+    if not text:
+        return None, False
+    if text.lower() in BODY_PART_STATUS_WORDS:
+        return None, True
+    return text, False
+
+
+# ESPN's comment on an Out that says the player is back: activated, or practicing (a participant, practiced,
+# returned to practice). Negated ("did not practice"), hypothetical ("a chance to resume practicing") and unrelated
+# ("broke his foot in practice") mentions do not count.
+_NEGATION = re.compile(r"\bnot\b|n't\b|\bno\b|\bnever\b|\bwithout\b|\bunable to\b|\bsat out\b|\bmiss(?:ed|es|ing)?\b|\bskip(?:ped|s|ping)?\b")
+_HYPOTHETICAL = re.compile(r"\bto be\b|\bwill\b|\bcould\b|\bmay\b|\bmight\b|\bchance\b|\bif\b|\bunless\b|\buntil\b|"
+                           r"\bhopes?\b|\bexpected\b|\bresume\b|\beligible\b|\bset to\b|\bwhen\b|\bwould\b")
+_ACTIVATED = re.compile(r"\bactivated\b")
+_PRACTICING = re.compile(
+    r"\b(?:full|limited)\s+(?:practice\s+)?participant\b|\bpracticed\b|\bpracticing\b|\breturned to practice\b|"
+    r"\bparticipated in\b[^.]{0,20}\bpractice\b|\blimited in\b[^.]{0,20}\bpractice\b|\bback at practice\b")
+
+
+def comment_contradicts_out(comment: str | None) -> str | None:
+    """``"activated"`` or ``"practicing"`` when ESPN's comment on a report says the player was activated or is
+    practicing (and not that he did not, or only might); else None. For an Out record, that means the status may be
+    stale despite its date."""
+    low = (comment or "").lower()
+    for rx, kind in ((_ACTIVATED, "activated"), (_PRACTICING, "practicing")):
+        for m in rx.finditer(low):
+            before = low[max(0, m.start() - 40):m.start()].rsplit(".", 1)[-1]
+            if _NEGATION.search(before) or _HYPOTHETICAL.search(before):
+                continue
+            return kind
+    return None

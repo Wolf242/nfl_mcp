@@ -86,6 +86,34 @@ listed when the median gap is inside the 1.5-point tie band, and also when the s
 outside it, or on who leads) even if the median is outside it: those read "not a clear call" with `sources_disagree` and the sources
 named. Each is a toss-up or an unclear call, not a reason to switch: the pair goes to `compare_players`.
 
+## While games are being played
+
+Yahoo serves a different matchup page once games start (seen 2026-10-29): two lineup tables drawn by script after the page
+loads, with abbreviated names ("C. Hubbard"), the Yahoo player id in `data-ys-playerid`, the points so far in `Fan Pts` and, for a
+player whose game has started, two numbers in `Proj` (the pre-game projection, then Yahoo's live one). The roster page does not
+change but shows the points instead of a projection for a started player.
+
+* **Reading it.** The browser source waits (up to 15 s) for the lineup tables on a matchup page; `parse_matchup` reads both layouts
+  and returns `layout` (`classic`, `live` or None). Each player has `projected`, `points`, `started`, the game line (`scheduled`,
+  `live`, `final`, or a bye as "No Game") and, in the live layout, `live_projection` and the stat line. The check-in swaps in full
+  names by Yahoo id, or by first initial, surname, team and position when only one player fits.
+* **Totals.** A started player counts for his points so far and every other starter for the source's projection, so Yahoo and
+  nfl_mcp are compared on the same basis: "points so far plus projections for players yet to play". `starter_totals.counted_as_played`
+  names who was counted at points (with the game's status), `counted_as_projected` the rest, and `scope` says which starters a total
+  covers. A starter missing a number from either source is left out of both totals and listed with the reason in `not_compared`; a
+  total over part of the starters is never given without saying which. The opponent block uses the same rule for both sides (Yahoo's
+  numbers, since nfl_mcp has none for their players) and lists `counted_as_played` for each. A finished week is the points scored.
+* **No opponent.** If the page gives no lineup or no teams, the check-in says it could not read the Yahoo matchup page (named with its
+  week and team number), that the layout may have changed, and that this is not a bye week; the opponent comparison is left out.
+
+## ESPN's comment and the body part
+
+Each stored injury record is shown with ESPN's own comment on it (`comment` in `verification.injuries`, quoted in the `statement`).
+An **Out** whose comment says the player was activated or is practicing (not "did not practice", not "a chance to resume
+practicing") is flagged `status_may_be_stale`: "status may be stale despite its date". Such a record no longer makes a 0 projection a
+fact. A record built from the roster page (source `espn_roster`) has no ESPN comment. A body part that is really a status word
+("active", "inactive", "questionable", "out", ...) or "unknown" is ignored and the statement says "body part unknown".
+
 ## The injury warmer
 
 A check-in compares Yahoo's injury tags with nfl_mcp's own reports, and a cold crawl used to take minutes (146 s measured for a
