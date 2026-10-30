@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Real QB, K and DEF free-agent pages as fixtures** (read live through the CDP path on 2026-10-29, scrubbed of the league id, the
+  watch-link crumb, GUIDs and any add/watch link). All three parsed (25 QB, 25 K, 23 team defenses, with FA and `W (date)` tags); team
+  defenses carry no player id and map by team code. Tests pin them, and scan every live fixture for secrets.
 - **"Nothing on waivers beats your starters" now says what was read.** QB, TE, K and DEF free agents are read every check-in (RB and
   WR still only for a hole or problem) and compared with your starter at each position, with the FA / W tag; every free agent who
   projects above a starter is a target even inside the noise, and says so. The note and the waiver ranking's own message name the

@@ -104,3 +104,65 @@ def test_bye_week_rows_do_not_shift_columns_into_the_projection():
         assert s["pct_rostered"] and s["bye"]
     played = [s for s in slots.values() if s["bye"] != slots["George Kittle"]["bye"]]
     assert played and all(0 < s["projected"] < 40 for s in played)
+
+
+# ------------------------------------------------------------------ the QB, K and DEF free-agent pages, read live on 2026-10-29
+def _wire(name: str) -> list[dict]:
+    return parsers.parse_players(_page(name))["players"]
+
+
+def _states(rows):
+    out = {}
+    for r in rows:
+        out[r["availability"]["state"]] = out.get(r["availability"]["state"], 0) + 1
+    return out
+
+
+def test_the_qb_free_agent_page_parses_every_row_with_id_team_position_and_tag():
+    rows = _wire("players_qb")
+    assert len(rows) == 25 and all(r["position"] == "QB" for r in rows)
+    assert all(r["yahoo_id"] and r["name"] and r["team"] for r in rows) and len({r["yahoo_id"] for r in rows}) == 25
+    assert (rows[0]["name"], rows[0]["team"]) == ("Jacoby Brissett", "ARI")
+    assert _states(rows) == {"FA": 24, "W": 1}
+    rodgers = next(r for r in rows if r["name"] == "Aaron Rodgers")
+    assert rodgers["availability"] == {"state": "W", "clears": "Nov 1", "owner": None}
+    assert {r["injury"] for r in rows} == {None, "IR", "NA"} and all(r["game"] for r in rows)
+
+
+def test_the_k_free_agent_page_parses_every_row_and_its_waiver_dates():
+    rows = _wire("players_k")
+    assert len(rows) == 25 and all(r["position"] == "K" for r in rows)
+    assert all(r["yahoo_id"] and r["name"] and r["team"] for r in rows) and len({r["yahoo_id"] for r in rows}) == 25
+    assert _states(rows) == {"FA": 22, "W": 3}
+    assert {(r["name"], r["availability"]["clears"]) for r in rows if r["availability"]["state"] == "W"} == {
+        ("Trey Smack", "Nov 4"), ("Matt Gay", "Oct 31"), ("Ryan Fitzgerald", "Nov 4")}
+    assert {r["injury"] for r in rows} == {None, "NA"}
+
+
+def test_the_def_free_agent_page_lists_team_defenses_by_team_code_without_a_player_id():
+    rows = _wire("players_def_live")
+    assert len(rows) == 23 and all(r["position"] == "DEF" and r["yahoo_id"] is None for r in rows)
+    assert len({r["team"] for r in rows}) == 23 and (rows[0]["name"], rows[0]["team"]) == ("Jaguars", "JAX")
+    assert _states(rows) == {"FA": 15, "W": 8}
+    assert {r["availability"]["clears"] for r in rows if r["availability"]["state"] == "W"} >= {"Oct 31", "Nov 1", "Nov 4"}
+    ids = IdMap({})
+    assert all(ids.resolve(r["yahoo_id"], r["name"], r["team"], r["position"]) == (r["team"], "dst") for r in rows)
+
+
+def test_the_wire_rows_for_qb_k_and_def_carry_yahoos_own_tag_from_the_real_pages():
+    from nfl_mcp.yahoo import checkin
+    for name, pos in (("players_qb", "QB"), ("players_k", "K"), ("players_def_live", "DEF")):
+        rows = [checkin._wire_row(dict(r, player_id=r["yahoo_id"])) for r in _wire(name)]
+        assert all(r["tag"] == "FA" or r["tag"].startswith("W (") for r in rows), pos
+        assert all(r["position"] == pos and r["label"].endswith(f"({r['team']} {pos})") for r in rows), pos
+    assert next(r for r in map(checkin._wire_row, _wire("players_def_live")) if r["name"] == "Jaguars")["tag"] == "W (Oct 31)"
+
+
+def test_the_live_fixtures_carry_no_league_id_token_guid_email_or_write_link():
+    import re
+    for name in ("players_qb", "players_k", "players_def_live", "matchup_live", "roster_live"):
+        text = _page(name)
+        assert "1459067" not in text, name
+        assert not re.search(r"(?i)crumb|bcookie|csrf|addplayer|dropplayer", text), name
+        assert not re.search(r"[\w.+-]+@[\w-]+\.[a-z]{2,}", text), name
+        assert not re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-(?!000000000000)[0-9a-f]{12}", text), name

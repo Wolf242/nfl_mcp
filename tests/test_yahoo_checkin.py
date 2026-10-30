@@ -1642,10 +1642,8 @@ def test_the_targets_note_says_which_positions_were_read_and_never_says_nothing_
 
 @pytest.mark.asyncio
 async def test_the_check_in_always_reads_qb_te_k_and_def_and_lists_each_free_agent_above_a_starter(pages, tmp_path):
-    for pos in ("QB", "K"):  # the RB page, with its players relabelled
-        text = (FIX / "players_rb.html").read_text(encoding="utf-8").replace(" - RB", f" - {pos}")
-        (tmp_path / f"players_{pos}_A.html").write_text(text, encoding="utf-8")
-    shutil.copy(FIX / "players_te.html", tmp_path / "players_TE_A.html")
+    for src, pos in (("players_qb", "QB"), ("players_k", "K"), ("players_te", "TE"), ("players_def_live", "DEF")):
+        shutil.copy(FIX / f"{src}.html", tmp_path / f"players_{pos}_A.html")        # the pages as Yahoo served them
     base = await build()
     kicker = next(p for p in base["roster"]["slots"] if p["slot"] == "K")["our_projection"]
 
