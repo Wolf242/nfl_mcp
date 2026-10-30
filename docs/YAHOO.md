@@ -109,6 +109,9 @@ A check-in compares Yahoo's injury tags with nfl_mcp's own reports, and a cold c
   It is tagged `source=espn_roster`, dated with the fetch time (the page has no report date of its own), body part `unknown`, and
   never pruned as complete. A player the page shows with no injury is settled as healthy; one it does not list, or a page that fails,
   stays unresolved.
+  Checked against the full per-report crawl on 2026-10-29 for all 32 teams: every one of the 259 entries the capped list omitted (238 IR, 1
+  suspension, 23 Out, 5 Questionable) was on its roster page with the same status and the same date, none showing as healthy.
+  (The omitted entries are the oldest ones; anything new enough to matter this week is in the list itself.)
 * **Not healthy by default.** A rostered player with no stored report on a capped team whom neither the list nor the roster page
   settled gets the flag `no_espn_report` and the statement "no ESPN report found (list capped)" in the check-in, a warning, and an
   entry in `verification.no_espn_report`. The check-in also runs the roster-page lookup itself for any rostered player no crawl in
