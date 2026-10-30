@@ -204,7 +204,10 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
     - injury_refresh: when the injury reports for your roster's teams were last refreshed and for how
       many teams, whether an injury crawl is running now, and the background warmer's state; its
       ``line`` reads "injuries last refreshed at <time> (N teams)". The server refreshes them in the
-      background (at start, every 30 minutes Thursday to Monday, every 2 hours otherwise)
+      background (at start, every 30 minutes Thursday to Monday, every 2 hours otherwise). ESPN's
+      team injury list is capped at 25 reports per team, so a rostered player with no report whom
+      neither it nor the team's roster page settled is flagged ``no_espn_report`` ("no ESPN report
+      found (list capped)", also in ``verification.no_espn_report``): not a clean bill of health
     - close_calls: each starter and same-eligibility bench player whose median projection (across
       nfl_mcp, model, Sleeper and Yahoo, as compare_players takes it) is inside the 1.5-point tie band,
       or whose sources disagree (one inside the band, another outside it, or on who leads), with every
@@ -261,12 +264,17 @@ async def fantasy_checkin(week: int | None = None, league_id: str | None = None,
     async def project(players: list[dict], **kw) -> dict:
         return await projections.project_players(players, db=db, **kw)
 
-    return await build_checkin(
+    result = await build_checkin(
         await get_provider(league_id), league_id, mid, int(week), compare=compare_projections,
         project=project, targets=waiver_target_tools.get_waiver_targets,
         posts=news_social.get_insider_posts, schedules=schedules if season else None,
         refresh_injuries=refresh_injuries, week_start=week_start,
-        injury_freshness=lambda teams: injury_warmer.freshness(db, teams))
+        injury_freshness=lambda teams: injury_warmer.freshness(db, teams),
+        gap_lookup=lambda rows: injury_service.lookup_gaps(db, rows),
+        report_missing=injury_service.espn_report_missing)
+    if result.get("success") is not False:  # the next background refresh looks these up too
+        injury_warmer.remember_targets((result.get("wire") or {}).get("targets") or [])
+    return result
 
 
 class _ReadOnlyDb:

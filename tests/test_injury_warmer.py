@@ -71,7 +71,7 @@ class FakeDb:
 
 
 def crawler(calls, gate=None, fail=None):
-    async def crawl(teams, db):
+    async def crawl(teams, db, watch=None):
         calls.append(list(teams))
         if gate is not None:
             await gate.wait()
@@ -210,7 +210,7 @@ async def test_a_tool_call_waits_for_the_running_refresh_instead_of_starting_its
         await gate.wait()
         return "warm"
 
-    async def get_reports(teams=None, db=None, use_cache=True):
+    async def get_reports(teams=None, db=None, use_cache=True, watch=None):
         started.append(teams)
         return [{"player_id": "1"}]
     monkeypatch.setattr(svc, "get_injury_reports", get_reports)
@@ -369,7 +369,7 @@ async def test_the_server_starts_the_warmer_with_its_lifespan_and_stops_it_at_sh
     db = MagicMock()
     async with server._create_prefetch_lifespan(db)(None):
         await asyncio.sleep(0.05)
-        assert seen["running"] is True and seen["args"] == (db, w.yahoo_roster_teams)   # started with the server
+        assert seen["running"] is True and seen["args"] == (db, w.yahoo_watch)   # started with the server
     assert seen["running"] is False and server._warmer_task is None                    # and stopped with it
 
     seen.clear()
@@ -405,3 +405,155 @@ async def test_your_rosters_and_your_opponents_teams_are_what_it_warms(monkeypat
     assert await w.yahoo_roster_teams() == ["ATL", "LAR", "PIT"]          # a defense is not an injury team; a free agent has none
     monkeypatch.delenv("NFL_MCP_MY_ROSTER")
     assert await w.yahoo_roster_teams() == []
+
+
+# ------------------------------------------------------------------ the roster-page gap-fill
+from nfl_mcp.yahoo.idmap import norm_name  # noqa: E402
+
+REX = norm_name("Rex Runner")
+
+
+@pytest.fixture(autouse=True)
+def clean_registries():
+    svc.GAP_STATE.clear()
+    svc.TEAM_LIST_STATE.clear()
+    yield
+    svc.GAP_STATE.clear()
+    svc.TEAM_LIST_STATE.clear()
+
+
+def roster_payload(*athletes):
+    return {"team": {"abbreviation": "ATL", "id": "1"}, "athletes": [{"position": "offense", "items": [
+        {"id": pid, "fullName": name, "position": {"abbreviation": pos}, "injuries": inj} for pid, name, pos, inj in athletes]}]}
+
+
+class Router:
+    """ESPN, as the aggregator sees it: the league list and a roster page per team id."""
+
+    def __init__(self, listing, roster=None, roster_status=200):
+        self.listing, self.roster, self.roster_status, self.urls = listing, roster, roster_status, []
+
+    async def get(self, url, **kw):
+        self.urls.append(url)
+        if url == svc.TEAM_LIST_URL:
+            return Resp(200, self.listing)
+        if url.endswith("/roster"):
+            return Resp(self.roster_status, self.roster)
+        raise AssertionError(f"unexpected request {url}")
+
+
+ATL_ID = str(svc.InjuryAggregator.NFL_TEAMS.index("ATL"))
+CAPPED = {"ATL": svc.TEAM_LIST_CAP}
+
+
+@pytest.mark.asyncio
+async def test_an_out_player_missing_from_a_capped_list_gets_a_record_from_the_roster_page():
+    roster = roster_payload(("555", "Rex Runner", "RB", [{"status": "Out", "date": "2026-10-20T10:00Z"}]),
+                            ("556", "Cal Clear", "WR", []))
+    client = Router(payload(sizes=CAPPED), roster)
+    before = datetime.now(UTC)
+    agg = svc.InjuryAggregator(http_client=client, persist=False, watch={"ATL": {REX, norm_name("Cal Clear")}})
+    got = await agg.fetch_espn_injuries(["ATL"])
+    mine = [r for r in got if r.player_id == "555"]
+    assert len(mine) == 1 and len(got) == svc.TEAM_LIST_CAP + 1
+    r = mine[0].to_dict()
+    assert r["injury_status"] == "Out" and r["sources"] == ["espn_roster"] and r["injury_type"] == "unknown"
+    assert r["player_name"] == "Rex Runner" and r["position"] == "RB" and r["team_id"] == "ATL"
+    assert before <= datetime.fromisoformat(r["date_reported"]) <= datetime.now(UTC)      # the fetch time, not ESPN's 10-20
+    assert "2026-10-20" in r["injury_description"] and r["confidence"] <= 60
+    assert svc.GAP_STATE[("ATL", REX)] == "record" and svc.GAP_STATE[("ATL", norm_name("Cal Clear"))] == "clear"
+    assert not svc.espn_report_missing("ATL", "Rex Runner") and not svc.espn_report_missing("ATL", "Cal Clear")
+    assert client.urls.count(f"https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/{ATL_ID}/roster") == 1
+    assert "ATL" not in agg.complete_teams and agg.gap_records == 1       # still partial: nothing is pruned from it
+
+
+@pytest.mark.asyncio
+async def test_only_watched_players_missing_from_a_capped_team_are_looked_up():
+    roster = roster_payload(("555", "Rex Runner", "RB", [{"status": "Out", "date": "2026-10-20T10:00Z"}]))
+    # not capped: no roster request at all; capped but nobody watched: none either; a listed player is not looked up
+    for sizes, watch in (({"ATL": 3}, {"ATL": {REX}}), (CAPPED, {}), (CAPPED, {"ATL": {norm_name("Player ATL 0")}})):
+        client = Router(payload(sizes=sizes), roster)
+        got = await svc.InjuryAggregator(http_client=client, persist=False, watch=watch).fetch_espn_injuries(["ATL"])
+        assert not [u for u in client.urls if u.endswith("/roster")] and all(r.player_id != "555" for r in got)
+    assert svc.GAP_STATE[("ATL", norm_name("Player ATL 0"))] == "record"
+    assert svc.TEAM_LIST_STATE["ATL"]["capped"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_stored_report_with_a_body_part_is_never_overwritten(tmp_path):
+    from nfl_mcp.database import NFLDatabase
+    db = NFLDatabase(str(tmp_path / "t.db"))
+    db.upsert_injuries([{"player_id": "555", "player_name": "Rex Runner", "team_id": "ATL", "position": "RB",
+                         "injury_status": "Questionable", "injury_type": "Knee", "injury_description": "stored knee note",
+                         "date_reported": "2026-10-27T13:00Z", "severity": 2, "confidence": 65, "sources": ["ESPN"]}])
+    roster = roster_payload(("555", "Rex Runner", "RB", [{"status": "Out", "date": "2026-10-29T10:00Z"}]),
+                            ("557", "Sue Slot", "WR", [{"status": "Doubtful", "date": "2026-10-29T10:00Z"}]))
+    agg = svc.InjuryAggregator(http_client=Router(payload(sizes=CAPPED), roster), db=db, persist=False,
+                               watch={"ATL": {REX, norm_name("Sue Slot")}})
+    got = await agg.fetch_espn_injuries(["ATL"])
+    assert [r.player_id for r in got if r.sources == ["espn_roster"]] == ["557"]      # Rex has a record; Sue has none
+    db.upsert_injuries([r.to_dict() for r in got])                                    # what the warmer then stores
+    row = db.get_player_injury_from_cache("555", max_age_hours=24 * 365)
+    assert row["injury_type"] == "Knee" and row["injury_status"] == "Questionable"
+    assert row["date_reported"] == "2026-10-27T13:00Z" and row["injury_description"] == "stored knee note"
+    assert svc.GAP_STATE[("ATL", REX)] == "record"
+
+
+@pytest.mark.asyncio
+async def test_a_player_the_roster_page_cannot_settle_is_unresolved_and_flagged_not_healthy():
+    roster = roster_payload(("556", "Cal Clear", "WR", []))
+    watch = {"ATL": {REX}}
+    # he is not on the page; the page fails
+    for router in (Router(payload(sizes=CAPPED), roster), Router(payload(sizes=CAPPED), roster, roster_status=500)):
+        svc.GAP_STATE.clear()
+        got = await svc.InjuryAggregator(http_client=router, persist=False, watch=watch).fetch_espn_injuries(["ATL"])
+        assert len(got) == svc.TEAM_LIST_CAP
+        assert svc.GAP_STATE[("ATL", REX)] == "unresolved" and svc.espn_report_missing("ATL", "Rex Runner")
+    svc.GAP_STATE.clear()
+    assert svc.espn_report_missing("ATL", "Rex Runner") is True                        # never looked up: not healthy either
+    svc.GAP_STATE[("ATL", REX)] = "clear"
+    assert svc.espn_report_missing("ATL", "Rex Runner") is False                       # the roster page showed no injury
+    svc.GAP_STATE.clear()
+    svc.TEAM_LIST_STATE["ATL"] = {"capped": False, "at": "x"}
+    assert svc.espn_report_missing("ATL", "Rex Runner") is False                       # a complete list: absent means none
+    assert svc.espn_report_missing(None, "Rex Runner") is False and svc.espn_report_missing("ATL", None) is False
+
+
+@pytest.mark.asyncio
+async def test_the_check_in_lookup_stores_records_and_skips_what_was_already_settled(tmp_path, monkeypatch):
+    from nfl_mcp.database import NFLDatabase
+    db = NFLDatabase(str(tmp_path / "t.db"))
+    roster = roster_payload(("555", "Rex Runner", "RB", [{"status": "Out", "date": "2026-10-20T10:00Z"}]))
+    client = Router(payload(sizes=CAPPED), roster)
+
+    class Agg(svc.InjuryAggregator):
+        def __init__(self, **kw):
+            super().__init__(http_client=client, **kw)
+    monkeypatch.setattr(svc, "InjuryAggregator", Agg)
+    rows = [{"team": "ATL", "name": "Rex Runner", "position": "RB"}, {"team": "WSH", "name": "Commanders", "position": "DEF"}]
+    out = await svc.lookup_gaps(db, rows)
+    assert out == {"looked_up": 1, "records_added": 1}
+    stored = db.get_player_injury_from_cache("555", max_age_hours=24 * 365)
+    assert stored["injury_status"] == "Out" and stored["injury_type"] == "unknown"
+    n = len(client.urls)
+    assert await svc.lookup_gaps(db, rows) == {"looked_up": 0, "records_added": 0} and len(client.urls) == n   # settled: no request
+    assert svc.make_watch(rows) == {"ATL": {REX}}                                         # a defense is not watched
+
+
+@pytest.mark.asyncio
+async def test_the_warmer_watches_your_roster_your_opponent_and_the_latest_wire_targets():
+    seen = []
+
+    async def crawl(teams, db, watch=None):
+        seen.append(watch)
+        return [], set()
+
+    async def provider():
+        return {"teams": ["ATL", "LAR"], "players": [{"team": "ATL", "name": "Rex Runner", "position": "RB"},
+                                                    {"team": "WSH", "name": "Commanders", "position": "DEF"}]}
+    w.remember_targets([{"team": "LAR", "name": "Wes Wire", "position": "WR"}, {"name": None}])
+    try:
+        await run(THU_NOON, 1, provider=provider, crawl=crawl)
+    finally:
+        w.remember_targets([])
+    assert seen == [{"ATL": {REX}, "LAR": {norm_name("Wes Wire")}}]

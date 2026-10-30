@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Roster-page gap-fill for capped injury lists.** After the fast team-list crawl, each team at
+  ESPN's 25-report cap has its watched players (your roster, your opponent's, your latest wire
+  targets) that the list leaves out looked up on ESPN's per-team roster page. A record is added
+  only if none is stored for the player (nothing stored is overwritten), tagged
+  `source=espn_roster`, dated with the fetch time, body part `unknown`. `fantasy_checkin` flags a
+  rostered player neither source settled as "no ESPN report found (list capped)" instead of
+  treating him as healthy.
 - **Injury warmer** (`injury_warmer.py`): the server crawls the injuries for your Yahoo roster's and
   opponent's teams at start, then every 30 minutes Thursday to Monday and every 2 hours
   Tuesday and Wednesday (US Eastern), never starting a crawl while one is running. A tool call

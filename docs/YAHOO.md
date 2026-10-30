@@ -102,6 +102,17 @@ A check-in compares Yahoo's injury tags with nfl_mcp's own reports, and a cold c
   team's **newest 25 reports only**, so a team at that cap is treated as partial: its reports are stored, but nothing is pruned from
   it, and older reports (mostly long-term IR) come only from an earlier full crawl. `NFL_MCP_INJURY_TEAM_LIST=0` restores the
   per-report crawl, which is complete.
+* **Gap-fill from the roster page.** For each team at the cap, the players it leaves out are looked up on ESPN's per-team roster
+  page (`.../teams/{id}/roster`, one request per team, which lists every athlete's current injuries): your roster, this week's
+  opponent's, and the wire targets of your latest check-in. Only watched players are looked up, never the whole team. A record is
+  added only when **no report is stored** for the player, so a stored body part, practice status or report date is never overwritten.
+  It is tagged `source=espn_roster`, dated with the fetch time (the page has no report date of its own), body part `unknown`, and
+  never pruned as complete. A player the page shows with no injury is settled as healthy; one it does not list, or a page that fails,
+  stays unresolved.
+* **Not healthy by default.** A rostered player with no stored report on a capped team whom neither the list nor the roster page
+  settled gets the flag `no_espn_report` and the statement "no ESPN report found (list capped)" in the check-in, a warning, and an
+  entry in `verification.no_espn_report`. The check-in also runs the roster-page lookup itself for any rostered player no crawl in
+  this process has settled yet (a request only when something is unresolved).
 
 The check-in's `injury_refresh` says when the roster's injury reports were last refreshed and for how many teams ("injuries last
 refreshed at Thu 2026-10-29 18:12 ET (13 teams)"), lists roster teams with older or no reports, and says whether a crawl is running

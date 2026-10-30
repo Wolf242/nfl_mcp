@@ -251,6 +251,10 @@ def tool_env(pages, monkeypatch):
     monkeypatch.setattr(projections, "project_players", fake_project)
     monkeypatch.setattr(ros, "schedules_for", lambda db, season, weeks: fake_schedules(weeks))
     monkeypatch.setattr(injury_service, "get_injury_reports_with_retry", fake_refresh)
+
+    async def no_gap_lookup(db, rows):
+        return {"looked_up": 0, "records_added": 0}
+    monkeypatch.setattr(injury_service, "lookup_gaps", no_gap_lookup)
     monkeypatch.setattr(waiver_target_tools, "get_waiver_targets", fake_targets)
     monkeypatch.setattr(news_social, "get_insider_posts", fake_posts)
 
@@ -1532,3 +1536,38 @@ async def test_the_checkin_reports_when_injuries_were_last_refreshed_and_whether
         raise RuntimeError("db locked")
     r = await build(injury_freshness=broken)
     assert r["injury_refresh"] is None and any("when the injury reports were last refreshed" in w for w in r["warnings"])
+
+
+# ------------------------------------------------------------------ no ESPN report (capped list)
+@pytest.mark.asyncio
+async def test_a_player_neither_the_capped_list_nor_the_roster_page_settled_is_not_called_healthy(pages):
+    base = await build()
+    target = next(p for p in base["roster"]["slots"] if p["slot"] == "BN" and not p["nfl_injury_status"] and not p["on_bye"])
+    seen = []
+
+    def missing(team, name):
+        seen.append((team, name))
+        return name == target["name"]
+    r = await build(report_missing=missing)
+    flagged = next(p for p in r["roster"]["slots"] if p["name"] == target["name"])
+    assert "no_espn_report" in flagged["injury_flags"] and flagged["injury_statement"] == "no ESPN report found (list capped)"
+    assert [x["label"] for x in r["verification"]["no_espn_report"]] == [target["label"]]
+    assert r["verification"]["no_espn_report"][0]["statement"] == "no ESPN report found (list capped)"
+    assert r["verification"]["summary"]["no_espn_report"] == 1
+    w = [x for x in r["warnings"] if "no ESPN report found (list capped)" in x]
+    assert len(w) == 1 and target["label"] in w[0] and "not a clean bill of health" in w[0]
+    assert seen and all(name for _, name in seen)
+    # nothing is flagged when the hook says all is settled, or is not wired
+    assert (await build(report_missing=lambda t, n: False))["verification"]["no_espn_report"] == []
+    assert (await build())["verification"]["no_espn_report"] == []
+    hooked = []
+
+    async def lookup(rows):
+        hooked.append(len(rows))
+        return {}
+    await build(gap_lookup=lookup)
+    assert hooked and hooked[0] > 5                                  # the roster rows go to the roster-page lookup first
+
+    async def broken(rows):
+        raise RuntimeError("espn down")
+    assert any("capped injury list may have left out" in x for x in (await build(gap_lookup=broken))["warnings"])

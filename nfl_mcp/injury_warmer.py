@@ -86,11 +86,12 @@ class WarmState:
 state = WarmState()
 
 
-async def _crawl_and_store(db, teams: list[str], crawl: Callable[..., Awaitable[tuple]], now: datetime) -> dict:
+async def _crawl_and_store(db, teams: list[str], crawl: Callable[..., Awaitable[tuple]], now: datetime,
+                           watch: dict[str, set[str]] | None = None) -> dict:
     state.last_started, state.runs = now, state.runs + 1
     began = time.monotonic()
     try:
-        injuries, prunable = await crawl(teams, db)
+        injuries, prunable = await crawl(teams, db, watch=watch)
         written = await asyncio.to_thread(db.upsert_injuries, injuries, prune_missing=True, complete_teams=prunable)
     except Exception as e:  # the next refresh tries again; the stored reports stay as they were
         state.last_error = f"{type(e).__name__}: {e}"
@@ -109,8 +110,10 @@ async def _crawl_and_store(db, teams: list[str], crawl: Callable[..., Awaitable[
 
 
 async def warm_once(db, teams: list[str], *, crawl: Callable[..., Awaitable[tuple]] | None = None,
-                    now: datetime | None = None) -> dict:
+                    now: datetime | None = None, watch: dict[str, set[str]] | None = None) -> dict:
     """One refresh of ``teams``, unless an injury crawl is already running (then ``{"status": "skipped"}``).
+    ``watch`` (see ``injury_service.make_watch``) names the players to look up on ESPN's roster page when a
+    team's list is capped.
 
     The check and the start happen with no await between them, so two callers cannot both start one.
     """
@@ -120,12 +123,27 @@ async def warm_once(db, teams: list[str], *, crawl: Callable[..., Awaitable[tupl
     if running:
         state.skipped += 1
         return {"status": "skipped", "reason": "an injury crawl is already running", "running": running}
-    task = single_flight(WARM_KEY, lambda: _crawl_and_store(db, sorted(teams), crawl, now or datetime.now(UTC)))
+    task = single_flight(WARM_KEY, lambda: _crawl_and_store(db, sorted(teams), crawl, now or datetime.now(UTC), watch))
     return await task
+
+
+_targets: list[dict] = []   # the wire targets of the latest check-in: watched on the next refresh
+
+
+def remember_targets(rows: list[dict]) -> None:
+    """Keep the latest check-in's wire targets (``team``/``name``) in the watch list, so the next refresh looks them up too."""
+    _targets[:] = [{"team": r.get("team"), "name": r.get("name"), "position": r.get("position")}
+                   for r in rows or [] if r.get("name")]
 
 
 async def yahoo_roster_teams() -> list[str]:
     """The NFL teams of your Yahoo roster and this week's opponent's. ``[]`` when no Yahoo team is configured."""
+    return (await yahoo_watch())["teams"]
+
+
+async def yahoo_watch() -> dict:
+    """``{"teams": [...], "players": [rows]}`` for your Yahoo roster and this week's opponent's: the teams to crawl and
+    the players to look up if a team's list is capped. Both empty when no Yahoo team is configured."""
     from .defaults import resolve_league, resolve_roster
     from .week_context import resolve_season_week
     from .yahoo import is_yahoo_league
@@ -134,21 +152,24 @@ async def yahoo_roster_teams() -> list[str]:
 
     league, mid = resolve_league(None), resolve_roster(None)
     if not league or not mid or not is_yahoo_league(league) or not str(mid).isdigit():
-        return []
+        return {"teams": [], "players": []}
 
     def teams_of(rows: list[dict]) -> set[str]:
         return {t for t in (normalize_team(r.get("team")) for r in rows if r.get("position") != "DEF") if t}
 
     prov = await get_provider(league)
-    teams = teams_of(await prov.get_projection_inputs(str(mid)))
+    rows = list(await prov.get_projection_inputs(str(mid)))
+    teams = teams_of(rows)
     try:
         _, week, _ = await resolve_season_week(None, None)
         opponent, _ = _opponent(await prov.data.matchup(int(week), str(mid)), str(mid))
         if opponent:
-            teams |= teams_of(await prov.get_projection_inputs(str(opponent["mid"])))
+            theirs = list(await prov.get_projection_inputs(str(opponent["mid"])))
+            teams |= teams_of(theirs)
+            rows += theirs
     except Exception as e:  # the roster alone is still worth warming
         logger.info(f"[InjuryWarmer] opponent's teams unavailable ({e}); warming your roster's teams only")
-    return sorted(teams)
+    return {"teams": sorted(teams), "players": rows}
 
 
 async def _wait(shutdown_event: asyncio.Event, seconds: float) -> bool:
@@ -169,14 +190,19 @@ async def run_loop(db, teams_provider: Callable[[], Awaitable[list[str]]], shutd
     if not warm_enabled():
         logger.info("[InjuryWarmer] off (NFL_MCP_INJURY_WARM=0)")
         return
-    from .injury_service import InjuryAggregator
+    from .injury_service import InjuryAggregator, make_watch
 
     teams: list[str] = []
+    watch = None
     while not shutdown_event.is_set():
         now = clock()
         if is_due(state.last_started, now):
             try:
                 found = await teams_provider()
+                players = []
+                if isinstance(found, dict):  # a provider may also name the players to look up
+                    players, found = found.get("players") or [], found.get("teams") or []
+                watch = make_watch(players + _targets) or None
                 if found:
                     teams = found
                 elif not teams:
@@ -186,7 +212,7 @@ async def run_loop(db, teams_provider: Callable[[], Awaitable[list[str]]], shutd
                 logger.warning(f"[InjuryWarmer] could not read your roster's teams ({type(e).__name__}: {e})")
                 teams = teams or list(InjuryAggregator.NFL_TEAMS)
             try:
-                result = await warm_once(db, teams, crawl=crawl, now=now)
+                result = await warm_once(db, teams, crawl=crawl, now=now, watch=watch)
                 if result["status"] == "skipped":
                     # keep the start time where it was: due again at the next look, once the other crawl is done
                     logger.info(f"[InjuryWarmer] skipped: {result['reason']}")

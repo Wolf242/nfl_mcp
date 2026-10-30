@@ -39,6 +39,7 @@ NOISE_BAND_POINTS = 12.0
 NOISE_FLOOR_POINTS = 10.0
 # Two single players closer than this are a tie: the projections cannot tell them apart.
 PLAYER_TIE_POINTS = 1.5
+NO_ESPN_REPORT = "no ESPN report found (list capped)"  # a player neither ESPN's capped list nor its roster page settled
 STALE_INJURY_DAYS = 3  # a stored injury report older than this (or from before this NFL week) is not current
 EDGE_BAND_POINTS = 1.0  # a margin this close to the noise band is "at the edge" of it
 EASY_REPLACEMENT_COUNT = 3  # this many free agents projecting above a backup make him easy to replace
@@ -1209,6 +1210,8 @@ async def build_checkin(
     schedules: Callable[[list[int]], Awaitable[dict]] | None = None,
     refresh_injuries: Callable[[list[str]], Awaitable[tuple]] | None = None,
     injury_freshness: Callable[[list[str]], dict] | None = None,
+    gap_lookup: Callable[[list[dict]], Awaitable[dict]] | None = None,
+    report_missing: Callable[[str | None, str | None], bool] | None = None,
     today: date | None = None,
     now: datetime | None = None,
     week_start: date | None = None,
@@ -1258,6 +1261,11 @@ async def build_checkin(
         except Exception as e:
             refresh_stale = True
             warnings.append(f"Could not refresh nfl_mcp's injury reports ({e}); injury tags may be unverified.")
+    if gap_lookup is not None:  # roster players ESPN's capped team list may have left out
+        try:
+            await gap_lookup(rows)
+        except Exception as e:
+            warnings.append(f"Could not look up the players ESPN's capped injury list may have left out ({e}).")
     injury_refresh = None
     if injury_freshness is not None:  # read after the refresh, so a crawl it just finished is counted
         try:
@@ -1266,12 +1274,18 @@ async def build_checkin(
             warnings.append(f"Could not tell when the injury reports were last refreshed ({e}).")
     cmp = await compare(league_id, rows, week)
     warnings += cmp.get("warnings") or []
+    no_report: list[dict] = []
     for p in cmp["players"]:
         p.setdefault("label", label_of(p))
         p.setdefault("key", player_key(p))
         p["injury_flags"] = injury_flags(p, refresh_stale, now, week_start)
         p["injury_stale_reasons"] = (stale_reasons(p, refresh_stale, now, week_start)
                                      if p.get("nfl_injury_status") else [])
+        if (report_missing is not None and not p.get("nfl_injury_status") and p.get("name") and p["position"] != "DEF"
+                and report_missing(normalize_team(p.get("team")), p["name"])):
+            p["injury_flags"].append("no_espn_report")
+            p["injury_statement"] = p.get("injury_statement") or NO_ESPN_REPORT
+            no_report.append(p)
         p["projection_unknown"] = projection_unknown(p)
         if p["projection_unknown"]:
             warnings.append(f"{p['label']}: {p['projection_unknown']}. He is not ranked on projection.")
@@ -1368,6 +1382,13 @@ async def build_checkin(
     drops, drop_unknown = review["ranked"], review["unknown"]
     verify = verify_roster(cmp["players"], week, sched, refresh_stale=refresh_stale, now=now, week_start=week_start)
     warnings += verification_warnings(verify)
+    verify["no_espn_report"] = [{"key": p.get("key"), "name": p["name"], "label": p["label"], "team": p.get("team"),
+                                 "slot": p["slot"], "yahoo_tag": p.get("injury"), "statement": NO_ESPN_REPORT,
+                                 "verdict": "no_report"} for p in no_report]
+    verify["summary"]["no_espn_report"] = len(no_report)
+    for p in no_report:
+        warnings.append(f"{p['label']}: {NO_ESPN_REPORT}. That is not a clean bill of health: he has no stored report "
+                        "either, and the roster-page lookup did not settle it. Check the team report.")
 
     opponent, opp_warn = None, []
     try:
@@ -1415,7 +1436,7 @@ async def build_checkin(
     by_key = {r["key"]: r for r in verify["injuries"] if r.get("key")}
     for p in cmp["players"]:
         r = by_key.get(p.get("key"))
-        p["injury_statement"] = r["statement"] if r else None
+        p["injury_statement"] = r["statement"] if r else (NO_ESPN_REPORT if "no_espn_report" in p["injury_flags"] else None)
     warnings.append("Yahoo's projections are a comparison source only. Injury tags and bye weeks are cross-checked "
                     "above where nfl_mcp has data; anything marked yahoo_only or unverified rests on Yahoo alone.")
     return {

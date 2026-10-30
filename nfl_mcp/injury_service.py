@@ -4,7 +4,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import IntEnum
 from typing import Any
 
@@ -31,6 +31,17 @@ TEAM_LIST_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/inju
 TEAM_LIST_CAP = 25
 TEAM_LIST_MIN_TEAMS = 28  # fewer team groups than this is not the league's list: fall back to the athlete pages
 TEAM_LIST_TIMEOUT = 30.0  # the payload is ~9 MB
+# ESPN's per-team roster lists every athlete with his current injuries (status and date, no body part). It
+# fills the gap the capped list leaves, for the players we are watching only.
+ROSTER_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/{team_id}/roster"
+SOURCE_ROSTER = "espn_roster"
+UNKNOWN_BODY_PART = "unknown"
+NO_REPORT_STATEMENT = "no ESPN report found (list capped)"
+# What the last crawls learned in this process. ``TEAM_LIST_STATE[team]``: the team's list was ``capped`` (or complete)
+# and when. ``GAP_STATE[(team, name)]``: a watched player missing from a capped list was found on the roster page with a
+# ``record`` (stored), found there ``clear`` (no injury listed), or is ``unresolved`` (not found, or the page failed).
+TEAM_LIST_STATE: dict[str, dict] = {}
+GAP_STATE: dict[tuple[str, str], str] = {}
 # An empty team list is only believed in small numbers. One team's last injured
 # player recovering is routine; several teams losing every report in the same
 # crawl is ESPN serving empty lists (an outage), and pruning on it would mark
@@ -198,6 +209,81 @@ def parse_team_injury_list(payload: Any) -> dict[str, list[InjuryReport]]:
     return out
 
 
+def parse_team_ids(payload: Any) -> dict[str, str]:
+    """``{team: ESPN team id}`` from the league-wide list's team groups (the roster page is addressed by it)."""
+    from .teams import normalize_team
+
+    out: dict[str, str] = {}
+    groups = payload.get("injuries") if isinstance(payload, dict) else None
+    for group in groups if isinstance(groups, list) else []:
+        if isinstance(group, dict) and group.get("id"):
+            team = normalize_team(group.get("displayName"))
+            if team:
+                out[team] = str(group["id"])
+    return out
+
+
+def parse_roster_injuries(payload: Any) -> list[dict]:
+    """Every athlete on an ESPN team roster page: ``{id, name, position, injuries: [{status, date}]}``."""
+    out: list[dict] = []
+    groups = payload.get("athletes") if isinstance(payload, dict) else None
+    for group in groups if isinstance(groups, list) else []:
+        for a in (group.get("items") if isinstance(group, dict) else None) or []:
+            if isinstance(a, dict) and a.get("id") and (a.get("fullName") or a.get("displayName")):
+                pos = a.get("position")
+                out.append({"id": str(a["id"]), "name": a.get("fullName") or a.get("displayName"),
+                            "position": pos.get("abbreviation") if isinstance(pos, dict) else None,
+                            "injuries": [i for i in a.get("injuries") or [] if isinstance(i, dict) and i.get("status")]})
+    return out
+
+
+def roster_gap_report(athlete: dict, team: str, fetched_at: str) -> InjuryReport | None:
+    """The record for a watched athlete the capped list left out, from his roster-page injury; None when the
+    page lists none (or only a healthy status). The report date is the fetch time, the body part unknown and
+    the source ``espn_roster``: the page gives neither a body part nor a report date of its own, and this is
+    never a substitute for a stored report."""
+    listed = [i for i in athlete.get("injuries") or [] if not injury_status.is_healthy(i.get("status"))]
+    if not listed:
+        return None
+    newest = max(listed, key=lambda i: str(i.get("date") or ""))
+    normalized = InjuryAggregator.normalize_status(newest["status"])
+    return InjuryReport(
+        player_id=athlete["id"], player_name=athlete["name"], team_id=team, position=athlete.get("position"),
+        injury_status=normalized, injury_type=UNKNOWN_BODY_PART,
+        injury_description=(f"ESPN's roster page lists {newest['status']} (entry dated {newest.get('date') or 'unknown'}); "
+                            "it gives no body part or comment, and the team list was capped"),
+        game_status=None, severity=InjuryAggregator.get_severity(normalized),
+        confidence=min(status_confidence(normalized), 60), sources=[SOURCE_ROSTER],
+        date_reported=fetched_at, return_date=None)
+
+
+def make_watch(rows: list[dict]) -> dict[str, set[str]]:
+    """``{team: {normalized names}}`` for rows with a ``team`` and a ``name`` (defenses and free agents have none)."""
+    from .teams import normalize_team
+    from .yahoo.idmap import norm_name
+
+    out: dict[str, set[str]] = {}
+    for r in rows or []:
+        team = normalize_team(r.get("team"))
+        name = norm_name(r.get("name"))
+        if team and name and r.get("position") != "DEF":
+            out.setdefault(team, set()).add(name)
+    return out
+
+
+def espn_report_missing(team: str | None, name: str | None) -> bool:
+    """Whether a player with no stored injury report has none because ESPN's list was capped and nothing
+    resolved him: not a clean bill of health. False when the team's list was complete (absence there means no
+    report), or when his roster page was read and shows no injury (``clear``) or a record was stored."""
+    from .yahoo.idmap import norm_name
+    if not team or not name:
+        return False
+    state = TEAM_LIST_STATE.get(team)
+    if state is not None and not state["capped"]:
+        return False
+    return GAP_STATE.get((team, norm_name(name))) not in ("clear", "record")
+
+
 def extract_athlete_id(athlete_url: str | None) -> str | None:
     """ESPN athlete id from a Core-API ``$ref`` URL, or None.
 
@@ -237,7 +323,8 @@ class InjuryAggregator:
     # reused on a 304 (which has no body) so "not modified" != "no injuries".
     _page_refs_cache: dict[str, tuple[int, list[str]]] = {}
 
-    def __init__(self, http_client=None, db=None, persist: bool = True):
+    def __init__(self, http_client=None, db=None, persist: bool = True,
+                 watch: dict[str, set[str]] | None = None):
         """Initialize the aggregator.
 
         Args:
@@ -247,10 +334,18 @@ class InjuryAggregator:
             persist: Write fetched reports to ``db``. False for a caller that
                 owns persistence (the prefetch, which prunes as it writes) but
                 still wants the lookups.
+            watch: ``{team: normalized player names}`` to look up on ESPN's roster
+                page when the team's list is capped and leaves them out
+                (see :func:`make_watch`, :meth:`_fill_capped_gaps`).
         """
         self._http_client = http_client
         self._db = db
         self._persist = persist
+        self.watch = watch or {}
+        self._team_ids: dict[str, str] = {}
+        self.team_list_truncated: list[str] = []
+        self.team_list_seconds: float | None = None
+        self.gap_records = 0
         self._own_client = False
         # Semaphores for concurrency control
         self._team_semaphore = asyncio.Semaphore(MAX_CONCURRENT_TEAMS)
@@ -401,6 +496,8 @@ class InjuryAggregator:
             # The league-wide team list first (one request); only the teams it does not cover fall back
             # to the list-page-plus-detail crawl.
             listed = await self._fetch_team_list(teams)
+            if listed:
+                await self._fill_capped_gaps(listed)
             teams = [t for t in teams if t not in listed] if listed else teams
 
             # Fetch all teams concurrently with semaphore control
@@ -453,7 +550,9 @@ class InjuryAggregator:
             if resp.status_code != 200:
                 logger.info(f"[InjuryAggregator] team list returned {resp.status_code}; using the athlete pages")
                 return {}
-            parsed = parse_team_injury_list(resp.json())
+            body = resp.json()
+            parsed = parse_team_injury_list(body)
+            self._team_ids = parse_team_ids(body)
         except Exception as e:
             logger.info(f"[InjuryAggregator] team list unavailable ({type(e).__name__}: {e}); using the athlete pages")
             return {}
@@ -467,6 +566,8 @@ class InjuryAggregator:
             out[team] = parsed[team]
             self.complete_teams.discard(team)
             self.empty_teams.discard(team)
+            TEAM_LIST_STATE[team] = {"capped": len(parsed[team]) >= TEAM_LIST_CAP,
+                                     "at": datetime.now(UTC).isoformat()}
             if len(parsed[team]) >= TEAM_LIST_CAP:
                 self.team_list_truncated.append(team)
             else:
@@ -477,6 +578,76 @@ class InjuryAggregator:
         logger.info(f"[InjuryAggregator] team list: {sum(len(v) for v in out.values())} reports for {len(out)} teams "
                     f"in {self.team_list_seconds}s ({len(self.team_list_truncated)} at the {TEAM_LIST_CAP}-report cap)")
         return out
+
+    def _has_stored_record(self, player_id: str) -> bool:
+        """Whether a report is already stored for this player, from any source and of any age."""
+        if self._db is None or not hasattr(self._db, "get_player_injury_from_cache"):
+            return False
+        try:
+            return bool(self._db.get_player_injury_from_cache(str(player_id), max_age_hours=24 * 365))
+        except Exception as e:
+            logger.debug(f"[InjuryAggregator] stored report lookup failed for {player_id}: {e}")
+            return False
+
+    async def _fill_capped_gaps(self, listed: dict[str, list[InjuryReport]]) -> int:
+        """For each team whose list hit the cap, look up the watched players it leaves out on ESPN's roster
+        page and add a record for each one with an injury listed there -- but only when no report is stored
+        for him (a stored body part, practice status or report date is never overwritten). A player found
+        with no injury is ``clear``; one the page does not have, or a page that fails, is ``unresolved``."""
+        if not self.watch or not self.team_list_truncated:
+            return 0
+        from .config import get_http_headers
+        from .yahoo.idmap import norm_name
+
+        headers = get_http_headers("nfl_teams")
+        fetched_at = datetime.now(UTC).isoformat()
+
+        async def one(team: str) -> int:
+            have = {norm_name(r.player_name) for r in listed.get(team, [])}
+            missing = sorted(n for n in self.watch.get(team, ()) if n not in have)
+            for n in self.watch.get(team, ()):
+                if n in have:
+                    GAP_STATE[(team, n)] = "record"  # the list itself has him
+                else:
+                    GAP_STATE.pop((team, n), None)
+            if not missing:
+                return 0
+            athletes: list[dict] | None = None
+            team_id = self._team_ids.get(team)
+            if team_id:
+                async with self._team_semaphore:
+                    try:
+                        resp = await self._http_client.get(ROSTER_URL.format(team_id=team_id), headers=headers,
+                                                           timeout=REQUEST_TIMEOUT)
+                        athletes = parse_roster_injuries(resp.json()) if resp.status_code == 200 else None
+                    except Exception as e:
+                        logger.debug(f"[InjuryAggregator] roster page failed for {team}: {e}")
+            by_name: dict[str, dict | None] = {}
+            for a in athletes or []:
+                key = norm_name(a["name"])
+                by_name[key] = None if key in by_name else a  # two athletes of one name: no guess
+            added = 0
+            for n in missing:
+                athlete = by_name.get(n)
+                if athlete is None:
+                    GAP_STATE[(team, n)] = "unresolved"
+                    continue
+                report = roster_gap_report(athlete, team, fetched_at)
+                if report is None:
+                    GAP_STATE[(team, n)] = "clear"
+                elif self._has_stored_record(report.player_id):
+                    GAP_STATE[(team, n)] = "record"
+                else:
+                    listed.setdefault(team, []).append(report)
+                    GAP_STATE[(team, n)] = "record"
+                    added += 1
+            return added
+
+        counts = await asyncio.gather(*[one(t) for t in self.team_list_truncated], return_exceptions=True)
+        self.gap_records = sum(c for c in counts if isinstance(c, int))
+        if self.gap_records:
+            logger.info(f"[InjuryAggregator] roster page filled {self.gap_records} report(s) the capped list left out")
+        return self.gap_records
 
     async def _fetch_team_espn_injuries(self, team: str, headers: dict) -> list[InjuryReport]:
         """Fetch injuries for a single team from ESPN with batch detail fetching.
@@ -1061,7 +1232,8 @@ class InjuryAggregator:
 async def get_injury_reports(
     teams: list[str] | None = None,
     db=None,
-    use_cache: bool = True
+    use_cache: bool = True,
+    watch: dict[str, set[str]] | None = None,
 ) -> list[dict]:
     """Get injury reports for teams.
 
@@ -1073,7 +1245,7 @@ async def get_injury_reports(
     Returns:
         List of injury dicts
     """
-    async with InjuryAggregator(db=db) as aggregator:
+    async with InjuryAggregator(db=db, watch=watch) as aggregator:
         injuries = await aggregator.fetch_all_injuries(teams, use_cache)
         return [inj.to_dict() for inj in injuries]
 
@@ -1115,7 +1287,8 @@ def _crawl_key(teams: list[str] | None) -> str:
 
 async def get_injury_reports_bounded(teams: list[str] | None = None, db=None,
                                      wait: float = INJURY_CRAWL_WAIT_SECONDS,
-                                     inflight_cap: float | None = INJURY_CRAWL_INFLIGHT_WAIT_SECONDS
+                                     inflight_cap: float | None = INJURY_CRAWL_INFLIGHT_WAIT_SECONDS,
+                                     watch: dict[str, set[str]] | None = None
                                      ) -> tuple[list[dict], dict]:
     """``(reports, meta)``: `get_injury_reports` (cached), but waiting at most
     ``wait`` seconds. On timeout the crawl keeps running in the background
@@ -1139,7 +1312,7 @@ async def get_injury_reports_bounded(teams: list[str] | None = None, db=None,
         # An earlier call's crawl is still running: it will not be done in
         # a few seconds either.
         wait = min(wait, inflight_cap)
-    task = single_flight(key, lambda: get_injury_reports(teams=teams, db=db, use_cache=True))
+    task = single_flight(key, lambda: get_injury_reports(teams=teams, db=db, use_cache=True, **({"watch": watch} if watch else {})))
     done, rows = await wait_bounded(task, wait)
     if done:
         return rows, {"partial": False, "timed_out_sources": [], "stale": False}
@@ -1151,7 +1324,8 @@ async def get_injury_reports_bounded(teams: list[str] | None = None, db=None,
 
 async def get_injury_reports_with_retry(teams: list[str] | None = None, db=None,
                                         wait: float = INJURY_CRAWL_WAIT_SECONDS,
-                                        retry_wait: float = INJURY_RETRY_WAIT_SECONDS
+                                        retry_wait: float = INJURY_RETRY_WAIT_SECONDS,
+                                        watch: dict[str, set[str]] | None = None
                                         ) -> tuple[list[dict], dict]:
     """`get_injury_reports_bounded`, tried once more with a longer wait when the first try times out
     or raises. The crawl is single-flight, so the retry keeps waiting on the same background read
@@ -1165,7 +1339,8 @@ async def get_injury_reports_with_retry(teams: list[str] | None = None, db=None,
     for i, w in enumerate((wait, retry_wait)):
         try:
             rows, meta = await get_injury_reports_bounded(
-                teams, db, wait=w, inflight_cap=INJURY_CRAWL_INFLIGHT_WAIT_SECONDS if i == 0 else None)
+                teams, db, wait=w, inflight_cap=INJURY_CRAWL_INFLIGHT_WAIT_SECONDS if i == 0 else None,
+                watch=watch)
         except Exception as e:  # the read itself failed: say what it said, then try once more
             attempts.append({"wait_seconds": w, "outcome": "error", "error": f"{type(e).__name__}: {e}"})
             continue
@@ -1269,7 +1444,7 @@ def prunable_teams(complete: set[str], empty: set[str],
 
 
 async def crawl_injury_reports(teams: list[str] | None = None,
-                               db=None) -> tuple[list[dict], set[str]]:
+                               db=None, watch: dict[str, set[str]] | None = None) -> tuple[list[dict], set[str]]:
     """A fresh (uncached) crawl plus the teams it may prune.
 
     For the prefetch, which prunes reports a crawl no longer lists: only the
@@ -1285,12 +1460,36 @@ async def crawl_injury_reports(teams: list[str] | None = None,
         except Exception as e:
             logger.debug(f"[InjuryAggregator] shared database unavailable: {e}")
             db = None
-    async with InjuryAggregator(db=db, persist=False) as aggregator:
+    async with InjuryAggregator(db=db, persist=False, watch=watch) as aggregator:
         injuries = await aggregator.fetch_all_injuries(teams, use_cache=False)
         complete = set(aggregator.complete_teams)
         empty = set(aggregator.empty_teams) & complete
         prior = open_report_counts(db) if empty else {}
         return [inj.to_dict() for inj in injuries], prunable_teams(complete, empty, prior)
+
+
+async def lookup_gaps(db, rows: list[dict]) -> dict:
+    """Look up the players in ``rows`` (``team``/``name``) that no crawl in this process has resolved yet, for the
+    teams whose list is capped: their roster pages, then a record stored for each one with an injury there and no
+    stored report. A no-op when the warmer already did it (nothing unresolved), so a check-in right after the
+    warmer costs no request. Never raises; the result says what happened."""
+    need = {team: {n for n in names if GAP_STATE.get((team, n)) not in ("clear", "record")}
+            for team, names in make_watch(rows).items()
+            if TEAM_LIST_STATE.get(team, {"capped": True})["capped"]}
+    need = {t: n for t, n in need.items() if n}
+    if not need:
+        return {"looked_up": 0, "records_added": 0}
+    try:
+        async with InjuryAggregator(db=db, persist=False, watch=need) as agg:
+            listed = await agg._fetch_team_list(sorted(need))
+            await agg._fill_capped_gaps(listed)
+            new = [r.to_dict() for reps in listed.values() for r in reps if SOURCE_ROSTER in (r.sources or [])]
+        if new and db is not None:
+            await asyncio.to_thread(db.upsert_injuries, new)
+        return {"looked_up": sum(len(n) for n in need.values()), "records_added": len(new)}
+    except Exception as e:
+        logger.warning(f"[InjuryAggregator] roster gap lookup failed: {type(e).__name__}: {e}")
+        return {"looked_up": 0, "records_added": 0, "error": f"{type(e).__name__}: {e}"}
 
 
 async def get_player_injury_report(

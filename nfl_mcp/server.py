@@ -610,7 +610,7 @@ def _create_prefetch_lifespan(nfl_db: NFLDatabase):
         from . import injury_warmer
         if injury_warmer.warm_enabled():
             _warmer_task = asyncio.create_task(
-                injury_warmer.run_loop(nfl_db, injury_warmer.yahoo_roster_teams, _shutdown_event))
+                injury_warmer.run_loop(nfl_db, injury_warmer.yahoo_watch, _shutdown_event))
             logger.info("Background injury warmer started")
 
         try:
